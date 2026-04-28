@@ -18,12 +18,13 @@ import openpi.models.pi0_config as pi0_config
 import openpi.models.pi0_fast as pi0_fast
 import openpi.models.tokenizer as _tokenizer
 import openpi.policies.aloha_policy as aloha_policy
+# import openpi.policies.aloha_policy_my as aloha_policy
 import openpi.policies.droid_policy as droid_policy
+import openpi.policies.franka_xhand_policy as franka_xhand_policy
 import openpi.policies.libero_policy as libero_policy
 import openpi.shared.download as _download
 import openpi.shared.normalize as _normalize
 import openpi.training.droid_rlds_dataset as droid_rlds_dataset
-import openpi.training.misc.polaris_config as polaris_config
 import openpi.training.misc.roboarena_config as roboarena_config
 import openpi.training.optimizer as _optimizer
 import openpi.training.weight_loaders as weight_loaders
@@ -94,8 +95,8 @@ class DataConfig:
     rlds_data_dir: str | None = None
     # Action space for DROID dataset.
     action_space: droid_rlds_dataset.DroidActionSpace | None = None
-    # List of datasets to sample from: name, version, weight, and optionally filter_dict_path
-    datasets: Sequence[droid_rlds_dataset.RLDSDataset] = ()
+    # Path to the data filter file for DROID dataset
+    filter_dict_path: str | None = None
 
 
 class GroupFactory(Protocol):
@@ -276,6 +277,116 @@ class LeRobotAlohaDataConfig(DataConfigFactory):
             model_transforms=model_transforms,
             action_sequence_keys=self.action_sequence_keys,
         )
+    
+@dataclasses.dataclass(frozen=True)
+class LeRobotAlohaSimDataConfig(DataConfigFactory):
+    # If true, will convert joint dimensions to deltas with respect to the current state before passing to the model.
+    # Gripper dimensions will remain in absolute values.
+    use_delta_joint_actions: bool = True
+    # If provided, will be injected into the input data if the "prompt" key is not present.
+    default_prompt: str | None = None
+    # If true, this will convert the joint and gripper values from the standard Aloha space to
+    # the space used by the pi internal runtime which was used to train the base model. People who
+    # use standard Aloha data should set this to true.
+    adapt_to_pi: bool = True
+
+    # Repack transforms.
+    repack_transforms: tyro.conf.Suppress[_transforms.Group] = dataclasses.field(
+        default=_transforms.Group(
+            inputs=[
+                _transforms.RepackTransform(
+                    {
+                        "images": {"cam_high": "observation.images.cam_high",
+                                   "cam_left": "observation.images.cam_left",
+                                   "cam_right": "observation.images.cam_right",
+                                   "cam_front": "observation.images.cam_front"},
+                        "state": "observation.state",
+                        "actions": "action",
+                    }
+                )
+            ]
+        )
+    )
+    # Action keys that will be used to read the action sequence from the dataset.
+    action_sequence_keys: Sequence[str] = ("action",)
+
+    @override
+    def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
+        data_transforms = _transforms.Group(
+            inputs=[aloha_policy.AlohaInputs(adapt_to_pi=self.adapt_to_pi)],
+            outputs=[aloha_policy.AlohaOutputs(adapt_to_pi=self.adapt_to_pi)],
+        )
+        if self.use_delta_joint_actions:
+            delta_action_mask = _transforms.make_bool_mask(6, -1, 6, -1)
+            data_transforms = data_transforms.push(
+                inputs=[_transforms.DeltaActions(delta_action_mask)],
+                outputs=[_transforms.AbsoluteActions(delta_action_mask)],
+            )
+
+        model_transforms = ModelTransformFactory(default_prompt=self.default_prompt)(model_config)
+
+        return dataclasses.replace(
+            self.create_base_config(assets_dirs, model_config),
+            repack_transforms=self.repack_transforms,
+            data_transforms=data_transforms,
+            model_transforms=model_transforms,
+            action_sequence_keys=self.action_sequence_keys,
+        )
+
+
+@dataclasses.dataclass(frozen=True)
+class LeRobotFrankaXHandDataConfig(DataConfigFactory):
+    # The raw dataset stores absolute actions. For pi0/pi0.5 fine-tuning it is usually better to train
+    # the arm/TCP part as delta actions while keeping hand joint targets absolute.
+    use_delta_ee_actions: bool = True
+    use_delta_hand_actions: bool = False
+    default_prompt: str | None = None
+    action_dim: int = 18
+
+    repack_transforms: tyro.conf.Suppress[_transforms.Group] = dataclasses.field(
+        default=_transforms.Group(
+            inputs=[
+                _transforms.RepackTransform(
+                    {
+                        "images": {
+                            "cam_side": "observation.images.cam_side",
+                        },
+                        "state": "observation.state",
+                        "actions": "action",
+                        "prompt": "task",
+                    }
+                )
+            ]
+        )
+    )
+    action_sequence_keys: Sequence[str] = ("action",)
+
+    @override
+    def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
+        data_transforms = _transforms.Group(
+            inputs=[franka_xhand_policy.FrankaXHandInputs()],
+            outputs=[franka_xhand_policy.FrankaXHandOutputs(action_dim=self.action_dim)],
+        )
+
+        delta_action_mask = (
+            [self.use_delta_ee_actions] * 6
+            + [self.use_delta_hand_actions] * (self.action_dim - 6)
+        )
+        if any(delta_action_mask):
+            data_transforms = data_transforms.push(
+                inputs=[_transforms.DeltaActions(delta_action_mask)],
+                outputs=[_transforms.AbsoluteActions(delta_action_mask)],
+            )
+
+        model_transforms = ModelTransformFactory(default_prompt=self.default_prompt)(model_config)
+
+        return dataclasses.replace(
+            self.create_base_config(assets_dirs, model_config),
+            repack_transforms=self.repack_transforms,
+            data_transforms=data_transforms,
+            model_transforms=model_transforms,
+            action_sequence_keys=self.action_sequence_keys,
+        )
 
 
 @dataclasses.dataclass(frozen=True)
@@ -367,16 +478,8 @@ class RLDSDroidDataConfig(DataConfigFactory):
     # Filtering options. Can pass a path to a dictionary that maps episodes to timestep ranges
     # to tuples denoting ranges of time steps to keep (start, end). Episodes are uniquely identified with
     # f"{recording_folderpath}--{file_path}", both of which are present in the RLDS episode metadata.
-
-    # List of datasets to sample from: name, version, weight, and optionally filter_dict_path
-    datasets: Sequence[droid_rlds_dataset.RLDSDataset] = (
-        droid_rlds_dataset.RLDSDataset(
-            name="droid",
-            version="1.0.1",
-            weight=1.0,
-            filter_dict_path="gs://openpi-assets/droid/droid_sample_ranges_v1_0_1.json",
-        ),
-    )
+    # Path to the filter dictionary file.
+    filter_dict_path: str | None = "gs://openpi-assets/droid/droid_sample_ranges_v1_0_1.json"
 
     @override
     def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
@@ -419,7 +522,7 @@ class RLDSDroidDataConfig(DataConfigFactory):
             model_transforms=model_transforms,
             rlds_data_dir=self.rlds_data_dir,
             action_space=self.action_space,
-            datasets=self.datasets,
+            filter_dict_path=self.filter_dict_path,
         )
 
 
@@ -595,6 +698,1018 @@ _CONFIGS = [
         ),
         policy_metadata={"reset_pose": [0, -1.5, 1.5, 0, 0, 0]},
     ),
+    #################################################################################
+    ##################################################################################
+    TrainConfig(
+        name="pi0_aloha_sim_bowl_blue",
+        model=pi0_config.Pi0Config(),
+        data=LeRobotAlohaDataConfig(
+            repo_id="/data/data/lerobot_data/aloha_dataset/bowl_blue",
+            assets=AssetsConfig(
+                assets_dir="/data/data/lerobot_data/aloha_dataset",
+                asset_id="bowl_blue",
+            ),
+            base_config=DataConfig(prompt_from_task=True),
+            use_delta_joint_actions=True, 
+            adapt_to_pi=False,
+            repack_transforms=_transforms.Group(
+            inputs=[
+                _transforms.RepackTransform(
+                    {
+                        "images": {"cam_high": "observation.images.cam_high",
+                                   "cam_left": "observation.images.cam_left",
+                                   "cam_right": "observation.images.cam_right",
+                                   "cam_front": "observation.images.cam_front"},
+                        "state": "observation.state",
+                        "actions": "action",
+                        "prompt": "task",
+                    }
+                )
+            ]
+        )
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi0_base/params"),
+        num_train_steps=100_000,
+        freeze_filter=pi0_config.Pi0Config(
+            paligemma_variant="gemma_2b_lora", 
+            action_expert_variant="gemma_300m_lora"
+        ).get_freeze_filter(),
+        # Turn off EMA for LoRA finetuning.
+        ema_decay=None,
+        # Settings
+        batch_size=32,
+        num_workers=4,
+        fsdp_devices=1,
+    ),
+
+    TrainConfig(
+        name="pi05_aloha_sim_fruit_basket",
+        model=pi0_config.Pi0Config(pi05=True),  # 使用 pi0.5 模型
+        data=LeRobotAlohaDataConfig(
+            repo_id="/data/data/lerobot_data/aloha_dataset/fruit_basket",
+            assets=AssetsConfig(
+                assets_dir="/data/data/lerobot_data/aloha_dataset",
+                asset_id="fruit_basket",
+            ),
+            base_config=DataConfig(prompt_from_task=True),
+            use_delta_joint_actions=True, 
+            adapt_to_pi=False,
+            repack_transforms=_transforms.Group(
+            inputs=[
+                _transforms.RepackTransform(
+                    {
+                        "images": {"cam_high": "observation.images.cam_high",
+                                   "cam_left": "observation.images.cam_left",
+                                   "cam_right": "observation.images.cam_right",
+                                #    "cam_front": "observation.images.cam_front"
+                                },
+                        "state": "observation.state",
+                        "actions": "action",
+                        "prompt": "task",
+                    }
+                )
+            ]
+        )
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),  # 使用 pi0.5 预训练权重
+        num_train_steps=100_000,
+        freeze_filter=pi0_config.Pi0Config(
+            pi05=True,  # freeze_filter 也需要匹配 pi0.5
+            paligemma_variant="gemma_2b_lora", 
+            action_expert_variant="gemma_300m_lora"
+        ).get_freeze_filter(),
+        # Turn off EMA for LoRA finetuning.
+        ema_decay=None,
+        # Settings
+        batch_size=32,
+        num_workers=4,
+        fsdp_devices=1,
+    ),
+
+    TrainConfig(
+        name="pi05_aloha_sim_fruit_basket_v3",
+        model=pi0_config.Pi0Config(pi05=True),  # 使用 pi0.5 模型
+        data=LeRobotAlohaDataConfig(
+            repo_id="/data/data/lerobot_data/aloha_dataset/fruit_basket_v3",
+            assets=AssetsConfig(
+                assets_dir="/data/data/lerobot_data/aloha_dataset",
+                asset_id="fruit_basket_v3",
+            ),
+            base_config=DataConfig(prompt_from_task=True),
+            use_delta_joint_actions=True, 
+            adapt_to_pi=False,
+            repack_transforms=_transforms.Group(
+            inputs=[
+                _transforms.RepackTransform(
+                    {
+                        "images": {"cam_high": "observation.images.cam_high",
+                                   "cam_left": "observation.images.cam_left",
+                                   "cam_right": "observation.images.cam_right",
+                                #    "cam_front": "observation.images.cam_front"
+                                },
+                        "state": "observation.state",
+                        "actions": "action",
+                        "prompt": "task",
+                    }
+                )
+            ]
+        )
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),  # 使用 pi0.5 预训练权重
+        num_train_steps=100_000,
+        freeze_filter=pi0_config.Pi0Config(
+            pi05=True,  # freeze_filter 也需要匹配 pi0.5
+            paligemma_variant="gemma_2b_lora", 
+            action_expert_variant="gemma_300m_lora"
+        ).get_freeze_filter(),
+        # Turn off EMA for LoRA finetuning.
+        ema_decay=None,
+        # Settings
+        batch_size=32,
+        num_workers=4,
+        fsdp_devices=1,
+    ),
+
+    TrainConfig(
+        name="pi05_aloha_sim_tidy_up_v3_600",
+        model=pi0_config.Pi0Config(pi05=True),  # 使用 pi0.5 模型
+        data=LeRobotAlohaDataConfig(
+            repo_id="/data/data/lerobot_data/aloha_dataset/tidy_up_v3_600",
+            assets=AssetsConfig(
+                assets_dir="/data/data/lerobot_data/aloha_dataset",
+                asset_id="tidy_up_v3_600",
+            ),
+            base_config=DataConfig(prompt_from_task=True),
+            use_delta_joint_actions=True, 
+            adapt_to_pi=False,
+            repack_transforms=_transforms.Group(
+            inputs=[
+                _transforms.RepackTransform(
+                    {
+                        "images": {"cam_high": "observation.images.cam_high",
+                                   "cam_left": "observation.images.cam_left",
+                                   "cam_right": "observation.images.cam_right",
+                                #    "cam_front": "observation.images.cam_front"
+                                },
+                        "state": "observation.state",
+                        "actions": "action",
+                        "prompt": "task",
+                    }
+                )
+            ]
+        )
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),  # 使用 pi0.5 预训练权重
+        num_train_steps=50_000,
+        freeze_filter=pi0_config.Pi0Config(
+            pi05=True,  # freeze_filter 也需要匹配 pi0.5
+            paligemma_variant="gemma_2b_lora", 
+            action_expert_variant="gemma_300m_lora"
+        ).get_freeze_filter(),
+        # Turn off EMA for LoRA finetuning.
+        ema_decay=None,
+        # Settings
+        batch_size=32,
+        num_workers=4,
+        fsdp_devices=1,
+    ),
+
+    TrainConfig(
+        name="pi05_aloha_sim_tidy_up_v4",
+        model=pi0_config.Pi0Config(pi05=True),  # 使用 pi0.5 模型
+        data=LeRobotAlohaDataConfig(
+            repo_id="/data/data/lerobot_data/aloha_dataset/tidy_up_v4",
+            assets=AssetsConfig(
+                assets_dir="gs://openpi-assets/checkpoints/pi05_base/assets",
+                asset_id="trossen"
+            ),
+            base_config=DataConfig(prompt_from_task=True),
+            use_delta_joint_actions=True, 
+            adapt_to_pi=False,
+            repack_transforms=_transforms.Group(
+            inputs=[
+                _transforms.RepackTransform(
+                    {
+                        "images": {"cam_high": "observation.images.cam_high",
+                                   "cam_left": "observation.images.cam_left",
+                                   "cam_right": "observation.images.cam_right",
+                                #    "cam_front": "observation.images.cam_front"
+                                },
+                        "state": "observation.state",
+                        "actions": "action",
+                        "prompt": "task",
+                    }
+                )
+            ]
+        )
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),  # 使用 pi0.5 预训练权重
+        num_train_steps=100_000,
+        freeze_filter=pi0_config.Pi0Config(
+            pi05=True,  # freeze_filter 也需要匹配 pi0.5
+            paligemma_variant="gemma_2b_lora", 
+            action_expert_variant="gemma_300m_lora"
+        ).get_freeze_filter(),
+        # Turn off EMA for LoRA finetuning.
+        ema_decay=None,
+        # Settings
+        batch_size=32,
+        num_workers=16,
+        fsdp_devices=1,
+    ),
+
+
+    TrainConfig(
+        name="pi05_aloha_sim_tidy_up_v4_full_finetune",
+        model=pi0_config.Pi0Config(pi05=True),  # 使用 pi0.5 模型
+        data=LeRobotAlohaDataConfig(
+            repo_id="/data/data/lerobot_data/aloha_dataset/tidy_up_v4",
+            assets=AssetsConfig(
+                assets_dir="gs://openpi-assets/checkpoints/pi05_base/assets",
+                asset_id="trossen"
+            ),
+            base_config=DataConfig(prompt_from_task=True),
+            use_delta_joint_actions=True, 
+            adapt_to_pi=False,
+            repack_transforms=_transforms.Group(
+                inputs=[
+                    _transforms.RepackTransform(
+                        {
+                            "images": {
+                                "cam_high": "observation.images.cam_high",
+                                "cam_left": "observation.images.cam_left",
+                                "cam_right": "observation.images.cam_right",
+                            },
+                            "state": "observation.state",
+                            "actions": "action",
+                            "prompt": "task",
+                        }
+                    )
+                ]
+            )
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        num_train_steps=50_000,
+        # 全量微调的关键：不设置 freeze_filter（保持默认，不冻结任何参数）
+        # freeze_filter=...  # 删除这行
+        # 可以启用 EMA
+        ema_decay=0.99,
+        # Settings - 全量微调显存占用更大，可能需要减小 batch_size
+        batch_size=8,  # 或更小，取决于 GPU 显存
+        num_workers=16,
+        fsdp_devices=8,  # 如果显存不够，可以增加 fsdp_devices 来分片
+    ),
+
+    TrainConfig(
+        name="pi05_aloha_scene_7_round_1_full_finetune",
+        model=pi0_config.Pi0Config(pi05=True),  # 使用 pi0.5 模型
+        data=LeRobotAlohaDataConfig(
+            repo_id="/data/pi06star/data/lerobot_data/scene_v7_merged",
+            assets=AssetsConfig(
+                assets_dir="gs://openpi-assets/checkpoints/pi05_base/assets",
+                asset_id="trossen"
+            ),
+            base_config=DataConfig(prompt_from_task=True),
+            use_delta_joint_actions=True, 
+            adapt_to_pi=False,
+            repack_transforms=_transforms.Group(
+                inputs=[
+                    _transforms.RepackTransform(
+                        {
+                            "images": {
+                                "cam_high": "observation.images.cam_high",
+                                "cam_left": "observation.images.cam_left",
+                                "cam_right": "observation.images.cam_right",
+                            },
+                            "state": "observation.state",
+                            "actions": "action",
+                            "prompt": "task",
+                        }
+                    )
+                ]
+            )
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        num_train_steps=50_000,
+        # 全量微调的关键：不设置 freeze_filter（保持默认，不冻结任何参数）
+        # freeze_filter=...  # 删除这行
+        # 可以启用 EMA
+        ema_decay=0.99,
+        # Settings - 全量微调显存占用更大，可能需要减小 batch_size
+        batch_size=16,  # 或更小，取决于 GPU 显存
+        num_workers=16,
+        fsdp_devices=4,  # 如果显存不够，可以增加 fsdp_devices 来分片
+    ),
+
+    #####################################################################################
+    ## pi06 star
+    #####################################################################################
+
+    TrainConfig(
+        name="pi06_aloha_scene_2_round_1_full_finetune",
+        model=pi0_config.Pi0Config(pi05=True),  # 使用 pi0.5 模型
+        data=LeRobotAlohaDataConfig(
+            repo_id="/data/pi06star/data/lerobot_data/scene_0002_plus_hil/PI06_CE_20000",
+            assets=AssetsConfig(
+                assets_dir="gs://openpi-assets/checkpoints/pi05_base/assets",
+                asset_id="trossen"
+            ),
+            base_config=DataConfig(prompt_from_task=True),
+            use_delta_joint_actions=True, 
+            adapt_to_pi=False,
+            repack_transforms=_transforms.Group(
+                inputs=[
+                    _transforms.RepackTransform(
+                        {
+                            "images": {
+                                "cam_high": "observation.images.cam_high",
+                                "cam_left": "observation.images.cam_left",
+                                "cam_right": "observation.images.cam_right",
+                            },
+                            "state": "observation.state",
+                            "actions": "action",
+                            "prompt": "task",
+                        }
+                    )
+                ]
+            )
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        num_train_steps=50_000,
+        # 全量微调的关键：不设置 freeze_filter（保持默认，不冻结任何参数）
+        # freeze_filter=...  # 删除这行
+        # 可以启用 EMA
+        ema_decay=0.99,
+        # Settings - 全量微调显存占用更大，可能需要减小 batch_size
+        batch_size=16,  # 或更小，取决于 GPU 显存
+        num_workers=16,
+        fsdp_devices=4,  # 如果显存不够，可以增加 fsdp_devices 来分片
+    ),
+
+    TrainConfig(
+        name="pi06_aloha_scene_2_round_1_full_finetune_vjepa",
+        model=pi0_config.Pi0Config(pi05=True),  # 使用 pi0.5 模型
+        data=LeRobotAlohaDataConfig(
+            repo_id="/data/data/lerobot_data/scene_0002_plus_hil/VJEPA_CLIP_CE_26000",
+            assets=AssetsConfig(
+                assets_dir="gs://openpi-assets/checkpoints/pi05_base/assets",
+                asset_id="trossen"
+            ),
+            base_config=DataConfig(prompt_from_task=True),
+            use_delta_joint_actions=True, 
+            adapt_to_pi=False,
+            repack_transforms=_transforms.Group(
+                inputs=[
+                    _transforms.RepackTransform(
+                        {
+                            "images": {
+                                "cam_high": "observation.images.cam_high",
+                                "cam_left": "observation.images.cam_left",
+                                "cam_right": "observation.images.cam_right",
+                            },
+                            "state": "observation.state",
+                            "actions": "action",
+                            "prompt": "task",
+                        }
+                    )
+                ]
+            )
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        num_train_steps=40_000,
+        # 全量微调的关键：不设置 freeze_filter（保持默认，不冻结任何参数）
+        # freeze_filter=...  # 删除这行
+        # 可以启用 EMA
+        ema_decay=0.99,
+        # Settings - 全量微调显存占用更大，可能需要减小 batch_size
+        batch_size=16,  # 或更小，取决于 GPU 显存
+        num_workers=16,
+        fsdp_devices=4,  # 如果显存不够，可以增加 fsdp_devices 来分片
+    ),
+
+
+    #####################################################################################
+    ## pi06 star
+    #####################################################################################
+
+
+
+
+
+
+
+
+
+
+
+
+
+    TrainConfig(
+        name="pi05_aloha_tidy_up_v4_real_post_lora",
+        model=pi0_config.Pi0Config( 
+            pi05=True,  # freeze_filter 也需要匹配 pi0.5
+            paligemma_variant="gemma_2b_lora", 
+            action_expert_variant="gemma_300m_lora"),  # 使用 pi0.5 模型
+        data=LeRobotAlohaDataConfig(
+            repo_id="/data/data/lerobot_data/aloha_dataset_real/tidy_up_v4",
+            assets=AssetsConfig(
+                assets_dir="gs://openpi-assets/checkpoints/pi05_base/assets",
+                asset_id="trossen"
+            ),
+            base_config=DataConfig(prompt_from_task=True),
+            use_delta_joint_actions=True, 
+            adapt_to_pi=False,
+            repack_transforms=_transforms.Group(
+                inputs=[
+                    _transforms.RepackTransform(
+                        {
+                            "images": {
+                                "cam_high": "observation.images.cam_high",
+                                "cam_left": "observation.images.cam_left",
+                                "cam_right": "observation.images.cam_right",
+                            },
+                            "state": "observation.state",
+                            "actions": "action",
+                            "prompt": "task",
+                        }
+                    )
+                ]
+            )
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("/data/openpi-aloha/checkpoints/pi05_aloha_sim_tidy_up_v4_full_finetune/exp_1/49999/params"),
+        num_train_steps=30_000,
+        freeze_filter=pi0_config.Pi0Config(
+            pi05=True,  # freeze_filter 也需要匹配 pi0.5
+            paligemma_variant="gemma_2b_lora", 
+            action_expert_variant="gemma_300m_lora"
+        ).get_freeze_filter(),
+        # Turn off EMA for LoRA finetuning.
+        ema_decay=None,
+        # Settings - 全量微调显存占用更大，可能需要减小 batch_size
+        batch_size=32,  # 或更小，取决于 GPU 显存
+        num_workers=16,
+        fsdp_devices=1,  # 如果显存不够，可以增加 fsdp_devices 来分片
+    ),
+
+
+    TrainConfig(
+        name="pi05_aloha_scene_0002_real_post_lora",
+        model=pi0_config.Pi0Config( 
+            pi05=True,  # freeze_filter 也需要匹配 pi0.5
+            paligemma_variant="gemma_2b_lora", 
+            action_expert_variant="gemma_300m_lora"),  # 使用 pi0.5 模型
+        data=LeRobotAlohaDataConfig(
+            repo_id="/data/data/lerobot_data/aloha_dataset_real/scene_0002_real",
+            assets=AssetsConfig(
+                assets_dir="gs://openpi-assets/checkpoints/pi05_base/assets",
+                asset_id="trossen"
+            ),
+            base_config=DataConfig(prompt_from_task=True),
+            use_delta_joint_actions=True, 
+            adapt_to_pi=False,
+            repack_transforms=_transforms.Group(
+                inputs=[
+                    _transforms.RepackTransform(
+                        {
+                            "images": {
+                                "cam_high": "observation.images.cam_high",
+                                "cam_left": "observation.images.cam_left",
+                                "cam_right": "observation.images.cam_right",
+                            },
+                            "state": "observation.state",
+                            "actions": "action",
+                            "prompt": "task",
+                        }
+                    )
+                ]
+            )
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("/data/openpi-aloha/checkpoints/pi05_aloha_scene_0002_full_finetune/11000/params"),
+        num_train_steps=30_000,
+        freeze_filter=pi0_config.Pi0Config(
+            pi05=True,  # freeze_filter 也需要匹配 pi0.5
+            paligemma_variant="gemma_2b_lora", 
+            action_expert_variant="gemma_300m_lora"
+        ).get_freeze_filter(),
+        # Turn off EMA for LoRA finetuning.
+        ema_decay=None,
+        # Settings - 全量微调显存占用更大，可能需要减小 batch_size
+        batch_size=32,  # 或更小，取决于 GPU 显存
+        num_workers=16,
+        fsdp_devices=1,  # 如果显存不够，可以增加 fsdp_devices 来分片
+    ),
+    TrainConfig(
+        name="pi05_aloha_sim_1k_scene_0002_full_finetune",
+        model=pi0_config.Pi0Config(pi05=True),  # 使用 pi0.5 模型
+        data=LeRobotAlohaDataConfig(
+            repo_id="/data/data/lerobot_data/aloha_dataset/scene_0002_v2",
+            assets=AssetsConfig(
+                assets_dir="/data/data/p0_ckpt/pi05_base/assets",
+                asset_id="trossen"
+            ),
+            base_config=DataConfig(prompt_from_task=True),
+            use_delta_joint_actions=True, 
+            adapt_to_pi=False,
+            repack_transforms=_transforms.Group(
+                inputs=[
+                    _transforms.RepackTransform(
+                        {
+                            "images": {
+                                "cam_high": "observation.images.cam_high",
+                                "cam_left": "observation.images.cam_left",
+                                "cam_right": "observation.images.cam_right",
+                            },
+                            "state": "observation.state",
+                            "actions": "action",
+                            "prompt": "task",
+                        }
+                    )
+                ]
+            )
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("/data/data/p0_ckpt/pi05_base/params"),
+        num_train_steps=30_000,
+    ),
+     TrainConfig(
+        name="pi05_aloha_sim_1k_scene_0002_full_finetune_sim_merge_rollout",
+        model=pi0_config.Pi0Config(pi05=True),  # 使用 pi0.5 模型
+        data=LeRobotAlohaDataConfig(
+            repo_id="/data/scene_0002_sim_merge_rollout_real",
+            assets=AssetsConfig(
+                assets_dir="/data/p0_ckpt/pi05_base/assets",
+                asset_id="trossen"
+            ),
+            base_config=DataConfig(prompt_from_task=True),
+            use_delta_joint_actions=True, 
+            adapt_to_pi=False,
+            repack_transforms=_transforms.Group(
+                inputs=[
+                    _transforms.RepackTransform(
+                        {
+                            "images": {
+                                "cam_high": "observation.images.cam_high",
+                                "cam_left": "observation.images.cam_left",
+                                "cam_right": "observation.images.cam_right",
+                            },
+                            "state": "observation.state",
+                            "actions": "action",
+                            "prompt": "task",
+                        }
+                    )
+                ]
+            )
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("/data/p0_ckpt/pi05_base/params"),
+        num_train_steps=30_000,
+    ),
+    TrainConfig(
+        name="pi05_aloha_sim_1k_scene_0002_full_finetune_v3",
+        model=pi0_config.Pi0Config(pi05=True),  # 使用 pi0.5 模型
+        data=LeRobotAlohaDataConfig(
+            repo_id="/data/data/lerobot_data/aloha_dataset/scene_0002_v3",
+            assets=AssetsConfig(
+                assets_dir="/data/data/p0_ckpt/pi05_base/assets",
+                asset_id="trossen"
+            ),
+            base_config=DataConfig(prompt_from_task=True),
+            use_delta_joint_actions=True, 
+            adapt_to_pi=False,
+            repack_transforms=_transforms.Group(
+                inputs=[
+                    _transforms.RepackTransform(
+                        {
+                            "images": {
+                                "cam_high": "observation.images.cam_high",
+                                "cam_left": "observation.images.cam_left",
+                                "cam_right": "observation.images.cam_right",
+                            },
+                            "state": "observation.state",
+                            "actions": "action",
+                            "prompt": "task",
+                        }
+                    )
+                ]
+            )
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("/data/data/p0_ckpt/pi05_base/params"),
+        num_train_steps=30_000,
+    ),
+
+     TrainConfig(
+        name="pi05_aloha_sim_1k_scene_0003_full_finetune",
+        model=pi0_config.Pi0Config(pi05=True),  # 使用 pi0.5 模型
+        data=LeRobotAlohaDataConfig(
+            repo_id="/data/data/lerobot_data/scene_0003",
+            assets=AssetsConfig(
+                assets_dir="/data/data/p0_ckpt/pi05_base/assets",
+                asset_id="trossen"
+            ),
+            base_config=DataConfig(prompt_from_task=True),
+            use_delta_joint_actions=True, 
+            adapt_to_pi=False,
+            repack_transforms=_transforms.Group(
+                inputs=[
+                    _transforms.RepackTransform(
+                        {
+                            "images": {
+                                "cam_high": "observation.images.cam_high",
+                                "cam_left": "observation.images.cam_left",
+                                "cam_right": "observation.images.cam_right",
+                            },
+                            "state": "observation.state",
+                            "actions": "action",
+                            "prompt": "task",
+                        }
+                    )
+                ]
+            )
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("/data/data/p0_ckpt/pi05_base/params"),
+        num_train_steps=30_000,
+    ),
+
+      TrainConfig(
+        name="pi05_aloha_scene_0003_real_post_lora_human",
+        model=pi0_config.Pi0Config( 
+            pi05=True,  # freeze_filter 也需要匹配 pi0.5
+            paligemma_variant="gemma_2b_lora", 
+            action_expert_variant="gemma_300m_lora"),  # 使用 pi0.5 模型
+        data=LeRobotAlohaDataConfig(
+            repo_id="/data/data/lerobot_data/scene_0003_real_human/lerobot_data",
+            assets=AssetsConfig(
+                assets_dir="gs://openpi-assets/checkpoints/pi05_base/assets",
+                asset_id="trossen"
+            ),
+            base_config=DataConfig(prompt_from_task=True),
+            use_delta_joint_actions=True, 
+            adapt_to_pi=False,
+            repack_transforms=_transforms.Group(
+                inputs=[
+                    _transforms.RepackTransform(
+                        {
+                            "images": {
+                                "cam_high": "observation.images.cam_high",
+                                "cam_left": "observation.images.cam_left",
+                                "cam_right": "observation.images.cam_right",
+                            },
+                            "state": "observation.state",
+                            "actions": "action",
+                            "prompt": "task",
+                        }
+                    )
+                ]
+            )
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("/data/openpi-aloha/checkpoints/pi05_aloha_sim_1k_scene_0003_full_finetune/pi05_aloha_sim_1k_scene_0003_full_finetune/29999/params"),
+        num_train_steps=30_000,
+        freeze_filter=pi0_config.Pi0Config(
+            pi05=True,  # freeze_filter 也需要匹配 pi0.5
+            paligemma_variant="gemma_2b_lora", 
+            action_expert_variant="gemma_300m_lora"
+        ).get_freeze_filter(),
+        # Turn off EMA for LoRA finetuning.
+        ema_decay=None,
+        # Settings - 全量微调显存占用更大，可能需要减小 batch_size
+        batch_size=32,  # 或更小，取决于 GPU 显存
+        num_workers=16,
+        fsdp_devices=1,  # 如果显存不够，可以增加 fsdp_devices 来分片
+    ),
+     TrainConfig(
+        name="pi05_aloha_scene_0003_real_post_lora",
+        model=pi0_config.Pi0Config( 
+            pi05=True,  # freeze_filter 也需要匹配 pi0.5
+            paligemma_variant="gemma_2b_lora", 
+            action_expert_variant="gemma_300m_lora"),  # 使用 pi0.5 模型
+        data=LeRobotAlohaDataConfig(
+            repo_id="/data/data/lerobot_data/scene_0003_real/lerobot_data",
+            assets=AssetsConfig(
+                assets_dir="gs://openpi-assets/checkpoints/pi05_base/assets",
+                asset_id="trossen"
+            ),
+            base_config=DataConfig(prompt_from_task=True),
+            use_delta_joint_actions=True, 
+            adapt_to_pi=False,
+            repack_transforms=_transforms.Group(
+                inputs=[
+                    _transforms.RepackTransform(
+                        {
+                            "images": {
+                                "cam_high": "observation.images.cam_high",
+                                "cam_left": "observation.images.cam_left",
+                                "cam_right": "observation.images.cam_right",
+                            },
+                            "state": "observation.state",
+                            "actions": "action",
+                            "prompt": "task",
+                        }
+                    )
+                ]
+            )
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("/data/openpi-aloha/checkpoints/pi05_aloha_sim_1k_scene_0003_full_finetune/pi05_aloha_sim_1k_scene_0003_full_finetune/29999/params"),
+        num_train_steps=30_000,
+        freeze_filter=pi0_config.Pi0Config(
+            pi05=True,  # freeze_filter 也需要匹配 pi0.5
+            paligemma_variant="gemma_2b_lora", 
+            action_expert_variant="gemma_300m_lora"
+        ).get_freeze_filter(),
+        # Turn off EMA for LoRA finetuning.
+        ema_decay=None,
+        # Settings - 全量微调显存占用更大，可能需要减小 batch_size
+        batch_size=32,  # 或更小，取决于 GPU 显存
+        num_workers=16,
+        fsdp_devices=1,  # 如果显存不够，可以增加 fsdp_devices 来分片
+    ),
+    TrainConfig(
+        name="pi05_aloha_scene_0003_real_post_lora_single",
+        model=pi0_config.Pi0Config( 
+            pi05=True,  # freeze_filter 也需要匹配 pi0.5
+            paligemma_variant="gemma_2b_lora", 
+            action_expert_variant="gemma_300m_lora"),  # 使用 pi0.5 模型
+        data=LeRobotAlohaDataConfig(
+            repo_id="/data/data/lerobot_data/aloha_dataset/scene_0003_single/lerobot_data",
+            assets=AssetsConfig(
+                assets_dir="gs://openpi-assets/checkpoints/pi05_base/assets",
+                asset_id="trossen"
+            ),
+            base_config=DataConfig(prompt_from_task=True),
+            use_delta_joint_actions=True, 
+            adapt_to_pi=False,
+            repack_transforms=_transforms.Group(
+                inputs=[
+                    _transforms.RepackTransform(
+                        {
+                            "images": {
+                                "cam_high": "observation.images.cam_high",
+                                "cam_left": "observation.images.cam_left",
+                                "cam_right": "observation.images.cam_right",
+                            },
+                            "state": "observation.state",
+                            "actions": "action",
+                            "prompt": "task",
+                        }
+                    )
+                ]
+            )
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("/data/openpi-aloha/checkpoints/pi05_aloha_sim_1k_scene_0003_full_finetune/29999/params"),
+        num_train_steps=30_000,
+        freeze_filter=pi0_config.Pi0Config(
+            pi05=True,  # freeze_filter 也需要匹配 pi0.5
+            paligemma_variant="gemma_2b_lora", 
+            action_expert_variant="gemma_300m_lora"
+        ).get_freeze_filter(),
+        # Turn off EMA for LoRA finetuning.
+        ema_decay=None,
+        # Settings - 全量微调显存占用更大，可能需要减小 batch_size
+        batch_size=32,  # 或更小，取决于 GPU 显存
+        num_workers=16,
+        fsdp_devices=1,  # 如果显存不够，可以增加 fsdp_devices 来分片
+    ),
+
+    TrainConfig(
+        name="pi05_aloha_scene_0002_real_post_lora_single",
+        model=pi0_config.Pi0Config( 
+            pi05=True,  # freeze_filter 也需要匹配 pi0.5
+            paligemma_variant="gemma_2b_lora", 
+            action_expert_variant="gemma_300m_lora"),  # 使用 pi0.5 模型
+        data=LeRobotAlohaDataConfig(
+            repo_id="/data/data/lerobot_data/aloha_dataset/scene_0002_single/lerobot_data",
+            assets=AssetsConfig(
+                assets_dir="gs://openpi-assets/checkpoints/pi05_base/assets",
+                asset_id="trossen"
+            ),
+            base_config=DataConfig(prompt_from_task=True),
+            use_delta_joint_actions=True, 
+            adapt_to_pi=False,
+            repack_transforms=_transforms.Group(
+                inputs=[
+                    _transforms.RepackTransform(
+                        {
+                            "images": {
+                                "cam_high": "observation.images.cam_high",
+                                "cam_left": "observation.images.cam_left",
+                                "cam_right": "observation.images.cam_right",
+                            },
+                            "state": "observation.state",
+                            "actions": "action",
+                            "prompt": "task",
+                        }
+                    )
+                ]
+            )
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("/data/openpi-aloha/checkpoints/pi05_aloha_sim_1k_scene_0002_full_finetune_v3/my_experiment_pi05_aloha_sim_1k_scene_0002_full_finetune_v3/29999/params"),
+        num_train_steps=30_000,
+        freeze_filter=pi0_config.Pi0Config(
+            pi05=True,  # freeze_filter 也需要匹配 pi0.5
+            paligemma_variant="gemma_2b_lora", 
+            action_expert_variant="gemma_300m_lora"
+        ).get_freeze_filter(),
+        # Turn off EMA for LoRA finetuning.
+        ema_decay=None,
+        # Settings - 全量微调显存占用更大，可能需要减小 batch_size
+        batch_size=32,  # 或更小，取决于 GPU 显存
+        num_workers=16,
+        fsdp_devices=1,  # 如果显存不够，可以增加 fsdp_devices 来分片
+    ),
+     TrainConfig(
+        name="pi05_aloha_sim_1k_scene_0002_with_rotate_full_finetune",
+        model=pi0_config.Pi0Config(pi05=True),  # 使用 pi0.5 模型
+        data=LeRobotAlohaDataConfig(
+            repo_id="/data/data/lerobot_data/scene_0002_merged",
+            assets=AssetsConfig(
+                assets_dir="/data/data/p0_ckpt/pi05_base/assets",
+                asset_id="trossen"
+            ),
+            base_config=DataConfig(prompt_from_task=True),
+            use_delta_joint_actions=True, 
+            adapt_to_pi=False,
+            repack_transforms=_transforms.Group(
+                inputs=[
+                    _transforms.RepackTransform(
+                        {
+                            "images": {
+                                "cam_high": "observation.images.cam_high",
+                                "cam_left": "observation.images.cam_left",
+                                "cam_right": "observation.images.cam_right",
+                            },
+                            "state": "observation.state",
+                            "actions": "action",
+                            "prompt": "task",
+                        }
+                    )
+                ]
+            )
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("/data/data/p0_ckpt/pi05_base/params"),
+        num_train_steps=30_000,
+    ),
+
+
+    TrainConfig(
+        name="pi05_aloha_sim_1k_scene_0002_with_rotate_sim_merge_real_full_finetune",
+        model=pi0_config.Pi0Config(pi05=True),  # 使用 pi0.5 模型
+        data=LeRobotAlohaDataConfig(
+            repo_id="/data/data/lerobot_data/scene_0002_sim_merge_real",
+            assets=AssetsConfig(
+                assets_dir="/data/data/p0_ckpt/pi05_base/assets",
+                asset_id="trossen"
+            ),
+            base_config=DataConfig(prompt_from_task=True),
+            use_delta_joint_actions=True, 
+            adapt_to_pi=False,
+            repack_transforms=_transforms.Group(
+                inputs=[
+                    _transforms.RepackTransform(
+                        {
+                            "images": {
+                                "cam_high": "observation.images.cam_high",
+                                "cam_left": "observation.images.cam_left",
+                                "cam_right": "observation.images.cam_right",
+                            },
+                            "state": "observation.state",
+                            "actions": "action",
+                            "prompt": "task",
+                        }
+                    )
+                ]
+            )
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("/data/data/p0_ckpt/pi05_base/params"),
+        num_train_steps=30_000,
+    ),
+
+
+     TrainConfig(
+        name="pi05_aloha_scene_0002_with_rotate_real_post_lora",
+        model=pi0_config.Pi0Config( 
+            pi05=True,  # freeze_filter 也需要匹配 pi0.5
+            paligemma_variant="gemma_2b_lora", 
+            action_expert_variant="gemma_300m_lora"),  # 使用 pi0.5 模型
+        data=LeRobotAlohaDataConfig(
+            repo_id="/data/data/lerobot_data/scene_0002_with_rotate_real/lerobot_data",
+            assets=AssetsConfig(
+                assets_dir="gs://openpi-assets/checkpoints/pi05_base/assets",
+                asset_id="trossen"
+            ),
+            base_config=DataConfig(prompt_from_task=True),
+            use_delta_joint_actions=True, 
+            adapt_to_pi=False,
+            repack_transforms=_transforms.Group(
+                inputs=[
+                    _transforms.RepackTransform(
+                        {
+                            "images": {
+                                "cam_high": "observation.images.cam_high",
+                                "cam_left": "observation.images.cam_left",
+                                "cam_right": "observation.images.cam_right",
+                            },
+                            "state": "observation.state",
+                            "actions": "action",
+                            "prompt": "task",
+                        }
+                    )
+                ]
+            )
+        ),
+        
+        weight_loader=weight_loaders.CheckpointWeightLoader("/data/openpi-aloha/checkpoints/pi05_aloha_sim_1k_scene_0002_with_rotate_full_finetune/pi05_aloha_sim_1k_scene_0002_with_rotate_full_finetune/29999/params"),
+        num_train_steps=30_000,
+        freeze_filter=pi0_config.Pi0Config(
+            pi05=True,  # freeze_filter 也需要匹配 pi0.5
+            paligemma_variant="gemma_2b_lora", 
+            action_expert_variant="gemma_300m_lora"
+        ).get_freeze_filter(),
+        # Turn off EMA for LoRA finetuning.
+        ema_decay=None,
+        # Settings - 全量微调显存占用更大，可能需要减小 batch_size
+        batch_size=32,  # 或更小，取决于 GPU 显存
+        num_workers=16,
+        fsdp_devices=1,  # 如果显存不够，可以增加 fsdp_devices 来分片
+    ),
+
+     TrainConfig(
+        name="pi05_aloha_bowl_plate",
+        model=pi0_config.Pi0Config(pi05=True),  # 使用 pi0.5 模型
+        data=LeRobotAlohaDataConfig(
+            repo_id="/data/data/lerobot_data/aloha_dataset/bowl_plate_v3",
+            assets=AssetsConfig(
+                assets_dir="/data/data/lerobot_data/aloha_dataset",
+                asset_id="bowl_plate_v3",
+            ),
+            base_config=DataConfig(prompt_from_task=True),
+            use_delta_joint_actions=True, 
+            adapt_to_pi=False,
+            repack_transforms=_transforms.Group(
+            inputs=[
+                _transforms.RepackTransform(
+                    {
+                        "images": {"cam_high": "observation.images.cam_high",
+                                   "cam_left": "observation.images.cam_left",
+                                   "cam_right": "observation.images.cam_right",
+                                #    "cam_front": "observation.images.cam_front"
+                                },
+                        "state": "observation.state",
+                        "actions": "action",
+                        "prompt": "task",
+                    }
+                )
+            ]
+        )
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),  # 使用 pi0.5 预训练权重
+        num_train_steps=100_000,
+        freeze_filter=pi0_config.Pi0Config(
+            pi05=True,  # freeze_filter 也需要匹配 pi0.5
+            paligemma_variant="gemma_2b_lora", 
+            action_expert_variant="gemma_300m_lora"
+        ).get_freeze_filter(),
+        # Turn off EMA for LoRA finetuning.
+        ema_decay=None,
+        # Settings
+        batch_size=16,
+        num_workers=4,
+        fsdp_devices=1,
+    ),
+
+
+    TrainConfig(
+        name="pi0_aloha_towel_pink_my",
+        model=pi0_config.Pi0Config(),
+        data=LeRobotAlohaDataConfig(
+            repo_id="/data/data/lerobot_data/aloha_dataset/fold_pink_towel",
+            base_config=DataConfig(prompt_from_task=True),
+            use_delta_joint_actions=False,
+            repack_transforms=_transforms.Group(
+            inputs=[
+                _transforms.RepackTransform(
+                    {
+                        "images": {"cam_high": "observation.images.cam_front",
+                                   "cam_left": "observation.images.cam_left",
+                                   "cam_right": "observation.images.cam_right",
+                                  },
+                        "state": "observation.state",
+                        "actions": "action",
+                        "prompt": "task",
+                    }
+                )
+            ]
+        )
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi0_aloha_towel/params"),
+        num_train_steps=30_000,
+        freeze_filter=pi0_config.Pi0Config(
+            paligemma_variant="gemma_2b_lora", action_expert_variant="gemma_300m_lora"
+        ).get_freeze_filter(),
+        # Turn off EMA for LoRA finetuning.
+        ema_decay=None,
+        # Settings
+        batch_size=32,
+        num_workers=4,
+        fsdp_devices=1,
+    ),
+    
     #
     # Inference DROID configs.
     #
@@ -765,7 +1880,7 @@ _CONFIGS = [
     # Fine-tuning Aloha configs.
     #
     # This is a test config that is used to illustate how train on a custom LeRobot dataset.
-    # For instructions on how to convert and train on your own Aloha dataset see examples/aloha_real/README.md
+    # For instuctions on how to convert and train on your own Aloha dataset see examples/aloha_real/README.md
     TrainConfig(
         name="pi0_aloha_pen_uncap",
         model=pi0_config.Pi0Config(),
@@ -893,6 +2008,46 @@ _CONFIGS = [
         num_workers=0,  # Important: RLDS DataLoader requires num_workers=0, handles multi-processing internally
     ),
     TrainConfig(
+        name="pi05_franka_xhand_flower",
+        # Keep action_dim=32 to stay checkpoint-compatible with pi05_base.
+        # The 18-D franka+xhand state/action is padded before entering the model.
+        model=pi0_config.Pi0Config(pi05=True),
+        data=LeRobotFrankaXHandDataConfig(
+            repo_id="/data/flower_franka_xhand",
+            assets=AssetsConfig(asset_id="/data/openpi-aloha/assets/pi05_franka_xhand_flower/flower_franka_xhand"),
+            base_config=DataConfig(prompt_from_task=True),
+            use_delta_ee_actions=True,
+            use_delta_hand_actions=False,
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("/data/p0_ckpt/pi05_base/params"),
+        num_train_steps=30_000,
+        batch_size=32,
+        log_interval=100,
+        save_interval=5000,
+        keep_period=10_000,
+        num_workers=4,
+    ),
+    TrainConfig(
+        name="pi05_franka_xhand_flower_v2",
+        # Keep action_dim=32 to stay checkpoint-compatible with pi05_base.
+        # The 18-D franka+xhand state/action is padded before entering the model.
+        model=pi0_config.Pi0Config(pi05=True),
+        data=LeRobotFrankaXHandDataConfig(
+            repo_id="/data/flower_4_28",
+            assets=AssetsConfig(asset_id="/data/openpi-aloha/assets/pi05_franka_xhand_flower/flower_franka_xhand"),
+            base_config=DataConfig(prompt_from_task=True),
+            use_delta_ee_actions=True,
+            use_delta_hand_actions=False,
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("/data/p0_ckpt/pi05_base/params"),
+        num_train_steps=30_000,
+        batch_size=32,
+        log_interval=100,
+        save_interval=5000,
+        keep_period=10_000,
+        num_workers=4,
+    ),
+    TrainConfig(
         # This config is for fine-tuning pi05-DROID on a custom (smaller) DROID dataset.
         # Here, we use LeRobot data format (like for all other fine-tuning examples)
         # To convert your custom DROID dataset (<10s of hours) to LeRobot format, see examples/droid/convert_droid_data_to_lerobot.py
@@ -965,9 +2120,10 @@ _CONFIGS = [
         exp_name="debug_pi05",
         wandb_enabled=False,
     ),
-    # RoboArena & PolaRiS configs.
+    #
+    # RoboArena configs.
+    #
     *roboarena_config.get_roboarena_configs(),
-    *polaris_config.get_polaris_configs(),
 ]
 
 if len({config.name for config in _CONFIGS}) != len(_CONFIGS):
