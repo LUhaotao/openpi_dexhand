@@ -2027,17 +2027,52 @@ _CONFIGS = [
         keep_period=10_000,
         num_workers=4,
     ),
+      TrainConfig(
+        name="pi05_franka_xhand_flower_280_single",
+        # Keep action_dim=32 to stay checkpoint-compatible with pi05_base.
+        # The 18-D franka+xhand state/action is padded before entering the model.
+        model=pi0_config.Pi0Config(pi05=True),
+        data=LeRobotFrankaXHandDataConfig(
+            repo_id="/data/datasets/merge",
+            assets=AssetsConfig(asset_id="/data/datasets/merge"),
+            base_config=DataConfig(prompt_from_task=True),
+            use_delta_ee_actions=True,
+            use_delta_hand_actions=False,
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("/data/p0_ckpt/pi05_base/params"),
+        num_train_steps=30_000,
+        batch_size=32,
+        log_interval=100,
+        save_interval=5000,
+        keep_period=10_000,
+        num_workers=4,
+    ),
     TrainConfig(
         name="pi05_franka_xhand_flower_v2",
         # Keep action_dim=32 to stay checkpoint-compatible with pi05_base.
         # The 18-D franka+xhand state/action is padded before entering the model.
         model=pi0_config.Pi0Config(pi05=True),
         data=LeRobotFrankaXHandDataConfig(
-            repo_id="/data/flower_4_28",
-            assets=AssetsConfig(asset_id="/data/openpi-aloha/assets/pi05_franka_xhand_flower/flower_franka_xhand"),
+            repo_id="/data/datasets/flower_4_28",
+            assets=AssetsConfig(asset_id="/data/datasets/flower_4_28"),
             base_config=DataConfig(prompt_from_task=True),
             use_delta_ee_actions=True,
             use_delta_hand_actions=False,
+            repack_transforms=_transforms.Group(
+                inputs=[
+                    _transforms.RepackTransform(
+                        {
+                            "images": {
+                                "cam_side": "observation.images.cam_side",
+                                "cam_wrist": "observation.images.cam_wrist",
+                            },
+                            "state": "observation.state",
+                            "actions": "action",
+                            "prompt": "task",
+                        }
+                    )
+                ]
+            )
         ),
         weight_loader=weight_loaders.CheckpointWeightLoader("/data/p0_ckpt/pi05_base/params"),
         num_train_steps=30_000,
