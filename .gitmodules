@@ -4,3 +4,6 @@
 [submodule "third_party/libero"]
 	path = third_party/libero
 	url = https://github.com/Lifelong-Robot-Learning/LIBERO.git
+[submodule "third_party/pi-r2-GR00T"]
+	path = third_party/pi-r2-GR00T
+	url = https://github.com/Yenomal/pi-r2-GR00T.git

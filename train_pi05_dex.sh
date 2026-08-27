@@ -5,8 +5,21 @@ cd /data/openpi_dexhand
 
 export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
 export XLA_PYTHON_CLIENT_MEM_FRACTION=0.9
+export XLA_PYTHON_CLIENT_PREALLOCATE=false
 
-uv run scripts/train.py pi05_franka_xhand_flower_5_6_prompt \
-  --exp-name=my_experiment \
+# export TMPDIR=/data/tmp
+# export TEST_TMPDIR=/data/tmp
+# export XDG_CACHE_HOME=/data/.cache
+# export JAX_COMPILATION_CACHE_DIR=/data/jax_cache
+# export XLA_FLAGS=--xla_gpu_per_fusion_autotune_cache_dir=/data/jax_cache/xla_gpu_per_fusion_autotune_cache_dir
+
+# mkdir -p "$TMPDIR" "$XDG_CACHE_HOME" "$JAX_COMPILATION_CACHE_DIR/xla_gpu_per_fusion_autotune_cache_dir"
+
+# uv run scripts/train.py pi05_franka_xhand_flower_v2 \
+#   --exp-name=pi05_franka_xhand_flower_v2 \
+#   --overwrite
+
+uv run --with debugpy python -m debugpy --listen 5678 --wait-for-client scripts/train.py pi05_franka_xhand_flower_v2 \
+  --exp-name=pi05_franka_xhand_flower_v2 \
   --overwrite
   
