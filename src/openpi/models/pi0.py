@@ -307,3 +307,60 @@ class Pi0(_model.BaseModel):
 
         x_0, _ = jax.lax.while_loop(cond, step, (noise, 1.0))
         return x_0
+
+    def encode_prefix(self, observation: _model.Observation) -> dict:
+        """Encode image/language prefix and return its KV cache for another process."""
+        observation = _model.preprocess_observation(None, observation, train=False)
+        prefix_tokens, prefix_mask, prefix_ar_mask = self.embed_prefix(observation)
+        prefix_attn_mask = make_attn_mask(prefix_mask, prefix_ar_mask)
+        positions = jnp.cumsum(prefix_mask, axis=1) - 1
+        _, kv_cache = self.PaliGemma.llm([prefix_tokens, None], mask=prefix_attn_mask, positions=positions)
+        return {"kv_cache": kv_cache, "prefix_pad_mask": prefix_mask}
+
+    @at.typecheck
+    def sample_actions_from_prefix(
+        self,
+        rng: at.KeyArrayLike,
+        state: at.Float[at.Array, "b s"],
+        prefix_cache: dict,
+        *,
+        num_steps: int = 10,
+        noise: at.Float[at.Array, "b ah ad"] | None = None,
+    ) -> _model.Actions:
+        """Run flow matching using a prefix KV cache produced by ``encode_prefix``."""
+        kv_cache = jax.tree.map(jnp.asarray, prefix_cache["kv_cache"])
+        prefix_pad_masks = jnp.asarray(prefix_cache["prefix_pad_mask"], dtype=jnp.bool_)
+        batch_size = state.shape[0]
+        if noise is None:
+            noise = jax.random.normal(rng, (batch_size, self.action_horizon, self.action_dim))
+
+        dt = -1.0 / num_steps
+
+        def step(carry):
+            x_t, time = carry
+            suffix_observation = _model.Observation(
+                images={}, image_masks={}, state=state,
+            )
+            suffix_tokens, suffix_mask, suffix_ar_mask, adarms_cond = self.embed_suffix(
+                suffix_observation, x_t, jnp.broadcast_to(time, batch_size)
+            )
+            suffix_attn_mask = make_attn_mask(suffix_mask, suffix_ar_mask)
+            prefix_attn_mask = einops.repeat(prefix_pad_masks, "b p -> b s p", s=suffix_tokens.shape[1])
+            full_attn_mask = jnp.concatenate([prefix_attn_mask, suffix_attn_mask], axis=-1)
+            positions = jnp.sum(prefix_pad_masks, axis=-1)[:, None] + jnp.cumsum(suffix_mask, axis=-1) - 1
+            (_, suffix_out), _ = self.PaliGemma.llm(
+                [None, suffix_tokens],
+                mask=full_attn_mask,
+                positions=positions,
+                kv_cache=kv_cache,
+                adarms_cond=[None, adarms_cond],
+            )
+            v_t = self.action_out_proj(suffix_out[:, -self.action_horizon :])
+            return x_t + dt * v_t, time + dt
+
+        def cond(carry):
+            _, time = carry
+            return time >= -dt / 2
+
+        actions, _ = jax.lax.while_loop(cond, step, (noise, jnp.asarray(1.0)))
+        return actions

@@ -1,12 +1,14 @@
 import dataclasses
 import enum
 import logging
+import multiprocessing
 import socket
 
 import tyro
 
 from openpi.policies import policy as _policy
 from openpi.policies import policy_config as _policy_config
+from openpi.policies.multiprocess import MultiProcessPolicy
 from openpi.serving import websocket_policy_server
 from openpi.training import config as _config
 
@@ -50,6 +52,10 @@ class Args:
     port: int = 8000
     # Record the policy's behavior for debugging.
     record: bool = False
+
+    # Start separate VLM and FM websocket servers. The default path is unchanged.
+    multi_process: bool = False
+    vlm_port: int | None = None
 
     # Specifies how to load the policy. If not provided, the default policy for the environment will be used.
     policy: Checkpoint | Default = dataclasses.field(default_factory=Default)
@@ -97,6 +103,10 @@ def create_policy(args: Args) -> _policy.Policy:
 
 
 def main(args: Args) -> None:
+    if args.multi_process:
+        _serve_multi_process(args)
+        return
+
     policy = create_policy(args)
     policy_metadata = policy.metadata
 
@@ -115,6 +125,44 @@ def main(args: Args) -> None:
         metadata=policy_metadata,
     )
     server.serve_forever()
+
+
+def _serve_multi_process_role(args: Args, role: str, port: int) -> None:
+    policy = create_policy(args)
+    role_policy = MultiProcessPolicy(policy, role)
+    metadata = {**policy.metadata, "multi_process_role": role}
+    server = websocket_policy_server.WebsocketPolicyServer(
+        policy=role_policy,
+        host="0.0.0.0",
+        port=port,
+        metadata=metadata,
+    )
+    server.serve_forever()
+
+
+def _serve_multi_process(args: Args) -> None:
+    """Start blocking VLM and FM servers in separate processes."""
+    if args.vlm_port is None:
+        args.vlm_port = args.port + 1
+
+    process_context = multiprocessing.get_context("spawn")
+    vlm_process = process_context.Process(
+        target=_serve_multi_process_role, args=(args, "vlm", args.vlm_port), daemon=True
+    )
+    fm_process = process_context.Process(
+        target=_serve_multi_process_role, args=(args, "fm", args.port), daemon=True
+    )
+    vlm_process.start()
+    fm_process.start()
+    logging.info("Multi-process servers started: FM=%s, VLM=%s", args.port, args.vlm_port)
+    try:
+        vlm_process.join()
+        fm_process.join()
+    except KeyboardInterrupt:
+        vlm_process.terminate()
+        fm_process.terminate()
+        vlm_process.join()
+        fm_process.join()
 
 
 if __name__ == "__main__":
