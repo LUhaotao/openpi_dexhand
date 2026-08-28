@@ -16,9 +16,9 @@
 
 实现**高低频划分**：
 
-- [] 拆分原openpi server逻辑，允许vlm、fm分别多进程运行，设计KV Cache server存储
+- [*] 拆分原openpi server逻辑，允许vlm、fm分别多进程运行，设计KV Cache server存储
 
-- [] 配置对应的client调度方案，fm-vlm两个同步推理（双进程一样会抢占单个GPU，最好的办法是服务器跑VLM，本地跑FM，或者本地做显卡划分，这样很麻烦）
+- [*] 配置对应的client调度方案，fm-vlm两个同步推理（双进程一样会抢占单个GPU，最好的办法是服务器跑VLM，本地跑FM，或者本地做显卡划分，这样很麻烦）
 
 - [] 推理延迟测试接口
 
