@@ -5,12 +5,13 @@
 server：
 
 ```bash
-python scripts/serve_policy.py \
-  --multi-process \
-  --port 8000 \
-  --vlm-port 8001 \
-  --policy.config pi0_aloha_sim \
-  --policy.dir <checkpoint>
+  python scripts/serve_policy.py \
+    --multi-process \
+    --port 8000 \
+    --vlm-port 8001 \
+    policy:checkpoint \
+    --policy.config pi05_franka_xhand_flower_v2 \
+    --policy.dir=/data/dex_ws/pi05_checkpoints/pi05_franka_xhand_flower_zhb_right_600
 ```
 
 client：
