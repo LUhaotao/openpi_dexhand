@@ -46,27 +46,39 @@ def make_attn_mask(input_mask, mask_ar):
 
 @at.typecheck
 def posemb_sincos(
-    pos: at.Real[at.Array, " b"], embedding_dim: int, min_period: float, max_period: float
-) -> at.Float[at.Array, "b {embedding_dim}"]:
+    pos: at.Real[at.Array, "*b"], embedding_dim: int, min_period: float, max_period: float
+) -> at.Float[at.Array, "*b {embedding_dim}"]:
     """Computes sine-cosine positional embedding vectors for scalar positions."""
     if embedding_dim % 2 != 0:
         raise ValueError(f"embedding_dim ({embedding_dim}) must be divisible by 2")
 
     fraction = jnp.linspace(0.0, 1.0, embedding_dim // 2)
     period = min_period * (max_period / min_period) ** fraction
-    sinusoid_input = jnp.einsum(
-        "i,j->ij",
-        pos,
-        1.0 / period * 2 * jnp.pi,
-        precision=jax.lax.Precision.HIGHEST,
-    )
+    sinusoid_input = pos[..., None] * (1.0 / period * 2 * jnp.pi)
     return jnp.concatenate([jnp.sin(sinusoid_input), jnp.cos(sinusoid_input)], axis=-1)
+
+
+def _chunk_wise_timestep(action_horizon: int, chunk_size: int, dtype=jnp.float32) -> at.Float[at.Array, "..."]:
+    """Return the GR00T ``pir2`` ramp in OpenPI's noise-time convention."""
+    chunk_size = max(int(chunk_size), 1)
+    ramp_width = max(action_horizon - 2 * chunk_size, 1)
+    position = jnp.arange(action_horizon, dtype=dtype)
+    ramp = (position - chunk_size + 0.5) / ramp_width
+    return jnp.where(
+        position < chunk_size,
+        0.0,
+        jnp.where(position >= action_horizon - chunk_size, 1.0, ramp),
+    ).astype(dtype)
 
 
 class Pi0(_model.BaseModel):
     def __init__(self, config: pi0_config.Pi0Config, rngs: nnx.Rngs):
         super().__init__(config.action_dim, config.action_horizon, config.max_token_len)
         self.pi05 = config.pi05
+        self.streaming = config.streaming
+        self.streaming_chunk_size = config.streaming_chunk_size
+        self.streaming_constant_weight = config.streaming_constant_weight
+        self.streaming_chunk_wise_weight = config.streaming_chunk_wise_weight
         paligemma_config = _gemma.get_config(config.paligemma_variant)
         action_expert_config = _gemma.get_config(config.action_expert_variant)
         # TODO: rewrite gemma in NNX. For now, use bridge.
@@ -138,12 +150,12 @@ class Pi0(_model.BaseModel):
 
     @at.typecheck
     def embed_suffix(
-        self, obs: _model.Observation, noisy_actions: _model.Actions, timestep: at.Float[at.Array, " b"]
+        self, obs: _model.Observation, noisy_actions: _model.Actions, timestep: at.Float[at.Array, "b ..."]
     ) -> tuple[
         at.Float[at.Array, "b s emb"],
         at.Bool[at.Array, "b s"],
         at.Bool[at.Array, " s"],
-        at.Float[at.Array, "b emb"] | None,
+        at.Float[at.Array, "b ..."] | None,
     ]:
         input_mask = []
         ar_mask = []
@@ -169,7 +181,7 @@ class Pi0(_model.BaseModel):
             adarms_cond = time_emb
         else:
             # mix timestep + action information using an MLP (no adaRMS)
-            time_tokens = einops.repeat(time_emb, "b emb -> b s emb", s=self.action_horizon)
+            time_tokens = time_emb if self.streaming else einops.repeat(time_emb, "b emb -> b s emb", s=self.action_horizon)
             action_time_tokens = jnp.concatenate([action_tokens, time_tokens], axis=-1)
             action_time_tokens = self.action_time_mlp_in(action_time_tokens)
             action_time_tokens = nnx.swish(action_time_tokens)
@@ -189,13 +201,31 @@ class Pi0(_model.BaseModel):
     def compute_loss(
         self, rng: at.KeyArrayLike, observation: _model.Observation, actions: _model.Actions, *, train: bool = False
     ) -> at.Float[at.Array, "*b ah"]:
-        preprocess_rng, noise_rng, time_rng = jax.random.split(rng, 3)
+        preprocess_rng, noise_rng, time_rng, regime_rng = jax.random.split(rng, 4)
         observation = _model.preprocess_observation(preprocess_rng, observation, train=train)
 
         batch_shape = actions.shape[:-2]
         noise = jax.random.normal(noise_rng, actions.shape)
-        time = jax.random.beta(time_rng, 1.5, 1, batch_shape) * 0.999 + 0.001
-        time_expanded = time[..., None, None]
+        if self.streaming:
+            constant_weight = self.streaming_constant_weight
+            chunk_weight = self.streaming_chunk_wise_weight
+            total_weight = constant_weight + chunk_weight
+            if total_weight <= 0:
+                raise ValueError("At least one streaming regime weight must be positive")
+            use_chunk_wise = jax.random.uniform(regime_rng) < (chunk_weight / total_weight)
+            constant_time = jax.random.beta(time_rng, 1.5, 1, batch_shape) * 0.999 + 0.001
+            chunk_time = jnp.broadcast_to(
+                _chunk_wise_timestep(
+                    self.action_horizon,
+                    self.streaming_chunk_size,
+                    dtype=actions.dtype,
+                ),
+                (*batch_shape, self.action_horizon),
+            )
+            time = jnp.where(use_chunk_wise, chunk_time, constant_time[..., None])
+        else:
+            time = jax.random.beta(time_rng, 1.5, 1, batch_shape) * 0.999 + 0.001
+        time_expanded = time[..., None] if self.streaming else time[..., None, None]
         x_t = time_expanded * noise + (1 - time_expanded) * actions
         u_t = noise - actions
 
