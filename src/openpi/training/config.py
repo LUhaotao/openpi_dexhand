@@ -1709,7 +1709,202 @@ _CONFIGS = [
         num_workers=4,
         fsdp_devices=1,
     ),
-    
+    TrainConfig(
+        name="pi05_franka_xhand_flower_zhb_right_600",
+        # Keep action_dim=32 to stay checkpoint-compatible with pi05_base.
+        # The 18-D franka+xhand state/action is padded before entering the model.
+        model=pi0_config.Pi0Config(pi05=True),
+        data=LeRobotFrankaXHandDataConfig(
+            repo_id="/data/datasets/flower_right_zhb/flower_right_600",
+            assets=AssetsConfig(asset_id="pi05_franka_xhand_flower_zhb_right_600"),
+            base_config=DataConfig(prompt_from_task=True),
+            use_delta_ee_actions=True,
+            use_delta_hand_actions=False,
+            repack_transforms=_transforms.Group(
+                inputs=[
+                    _transforms.RepackTransform(
+                        {
+                            "images": {
+                                "cam_side": "observation.images.cam_side",
+                                "cam_wrist": "observation.images.cam_wrist",
+                            },
+                            "state": "observation.state",
+                            "actions": "action",
+                            "prompt": "task",
+                        }
+                    )
+                ]
+            )
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("/data/p0_ckpt/pi05_base/params"),
+        num_train_steps=30_000,
+        batch_size=32,
+        log_interval=100,
+        save_interval=5000,
+        keep_period=5000,
+        num_workers=4,
+    ),    
+    TrainConfig(
+        name="pi05_franka_xhand_ego_human_500",
+        # Keep action_dim=32 to stay checkpoint-compatible with pi05_base.
+        # The 18-D franka+xhand state/action is padded before entering the model.
+        model=pi0_config.Pi0Config(pi05=True),
+        data=LeRobotFrankaXHandDataConfig(
+            repo_id="/data/datasets/ego_human_500_merge",
+            assets=AssetsConfig(asset_id="pi05_franka_xhand_ego_human_500"),
+            base_config=DataConfig(prompt_from_task=True),
+            use_delta_ee_actions=True,
+            use_delta_hand_actions=False,
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("/data/p0_ckpt/pi05_base/params"),
+        num_train_steps=30_000,
+        batch_size=32,
+        log_interval=100,
+        save_interval=5000,
+        keep_period=10_000,
+        num_workers=64,
+    ),
+    TrainConfig(
+        name="pi05_franka_xhand_ego_add_robot_40",
+        # Keep action_dim=32 to stay checkpoint-compatible with pi05_base.
+        # The 18-D franka+xhand state/action is padded before entering the model.
+        model=pi0_config.Pi0Config(pi05=True),
+        data=LeRobotFrankaXHandDataConfig(
+            repo_id="/data/datasets/ego_add_robot_40_merge",
+            assets=AssetsConfig(asset_id="pi05_franka_xhand_ego_add_robot_40"),
+            base_config=DataConfig(prompt_from_task=True),
+            use_delta_ee_actions=True,
+            use_delta_hand_actions=False,
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("/data/p0_ckpt/pi05_base/params"),
+        num_train_steps=30_000,
+        batch_size=32,
+        log_interval=100,
+        save_interval=5000,
+        keep_period=10_000,
+        num_workers=64,
+    ),
+    TrainConfig(
+        name="pi05_franka_xhand_ego_add_robot_20_full",
+        # Keep action_dim=32 to stay checkpoint-compatible with pi05_base.
+        # The 18-D franka+xhand state/action is padded before entering the model.
+        model=pi0_config.Pi0Config(pi05=True),
+        data=LeRobotFrankaXHandDataConfig(
+            repo_id="/data/datasets/ego_add_robot_20_full_merge",
+            assets=AssetsConfig(asset_id="pi05_franka_xhand_ego_add_robot_20_full"),
+            base_config=DataConfig(prompt_from_task=True),
+            use_delta_ee_actions=True,
+            use_delta_hand_actions=False,
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("/data/p0_ckpt/pi05_base/params"),
+        num_train_steps=30_000,
+        batch_size=32,
+        log_interval=100,
+        save_interval=5000,
+        keep_period=10_000,
+        num_workers=64,
+    ),
+    TrainConfig(
+        name="pi05_franka_xhand_ego_robot_20_human_50",
+        # Keep action_dim=32 to stay checkpoint-compatible with pi05_base.
+        # The 18-D franka+xhand state/action is padded before entering the model.
+        model=pi0_config.Pi0Config(pi05=True),
+        data=LeRobotFrankaXHandDataConfig(
+            repo_id="/data/datasets/ego_robot_20_human_50_merge",
+            assets=AssetsConfig(asset_id="pi05_franka_xhand_ego_robot_20_human_50"),
+            base_config=DataConfig(prompt_from_task=True),
+            use_delta_ee_actions=True,
+            use_delta_hand_actions=False,
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("/data/p0_ckpt/pi05_base/params"),
+        num_train_steps=30_000,
+        batch_size=32,
+        log_interval=100,
+        save_interval=5000,
+        keep_period=10_000,
+        num_workers=16,
+    ),
+
+    TrainConfig(
+        name="pi05_franka_xhand_ego_robot_40_human_100",
+        # Keep action_dim=32 to stay checkpoint-compatible with pi05_base.
+        # The 18-D franka+xhand state/action is padded before entering the model.
+        model=pi0_config.Pi0Config(pi05=True),
+        data=LeRobotFrankaXHandDataConfig(
+            repo_id="/data/datasets/ego_robot_40_human_100_merge",
+            assets=AssetsConfig(asset_id="pi05_franka_xhand_ego_robot_40_human_100"),
+            base_config=DataConfig(prompt_from_task=True),
+            use_delta_ee_actions=True,
+            use_delta_hand_actions=False,
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("/data/p0_ckpt/pi05_base/params"),
+        num_train_steps=30_000,
+        batch_size=32,
+        log_interval=100,
+        save_interval=5000,
+        keep_period=10_000,
+        num_workers=16,
+    ),
+    TrainConfig(
+        name="pi05_franka_xhand_ego_robot_60",
+        # Keep action_dim=32 to stay checkpoint-compatible with pi05_base.
+        # The 18-D franka+xhand state/action is padded before entering the model.
+        model=pi0_config.Pi0Config(pi05=True),
+        data=LeRobotFrankaXHandDataConfig(
+            repo_id="/data/datasets/ego_robot_60_merge",
+            assets=AssetsConfig(asset_id="pi05_franka_xhand_ego_robot_60"),
+            base_config=DataConfig(prompt_from_task=True),
+            use_delta_ee_actions=True,
+            use_delta_hand_actions=False,
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("/data/p0_ckpt/pi05_base/params"),
+        num_train_steps=30_000,
+        batch_size=32,
+        log_interval=100,
+        save_interval=5000,
+        keep_period=10_000,
+        num_workers=16,
+    ),
+    TrainConfig(
+        name="pi05_franka_xhand_ego_robot_60_human_100",
+        # Keep action_dim=32 to stay checkpoint-compatible with pi05_base.
+        # The 18-D franka+xhand state/action is padded before entering the model.
+        model=pi0_config.Pi0Config(pi05=True),
+        data=LeRobotFrankaXHandDataConfig(
+            repo_id="/data/datasets/ego_robot_60_human_100_merge",
+            assets=AssetsConfig(asset_id="pi05_franka_xhand_ego_robot_60_human_100"),
+            base_config=DataConfig(prompt_from_task=True),
+            use_delta_ee_actions=True,
+            use_delta_hand_actions=False,
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("/data/p0_ckpt/pi05_base/params"),
+        num_train_steps=30_000,
+        batch_size=32,
+        log_interval=100,
+        save_interval=5000,
+        keep_period=10_000,
+        num_workers=16,
+    ),
+    TrainConfig(
+        name="pi05_franka_xhand_ego_robot_20_human_100_origin",
+        # Keep action_dim=32 to stay checkpoint-compatible with pi05_base.
+        # The 18-D franka+xhand state/action is padded before entering the model.
+        model=pi0_config.Pi0Config(pi05=True),
+        data=LeRobotFrankaXHandDataConfig(
+            repo_id="/data/datasets/ego_robot_20_human_100_origin_merge",
+            assets=AssetsConfig(asset_id="pi05_franka_xhand_ego_robot_20_human_100_origin"),
+            base_config=DataConfig(prompt_from_task=True),
+            use_delta_ee_actions=True,
+            use_delta_hand_actions=False,
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("/data/p0_ckpt/pi05_base/params"),
+        num_train_steps=30_000,
+        batch_size=32,
+        log_interval=100,
+        save_interval=5000,
+        keep_period=10_000,
+        num_workers=16,
+    ),
     #
     # Inference DROID configs.
     #
@@ -2027,7 +2222,7 @@ _CONFIGS = [
         keep_period=10_000,
         num_workers=4,
     ),
-      TrainConfig(
+    TrainConfig(
         name="pi05_franka_xhand_flower_280_single",
         # Keep action_dim=32 to stay checkpoint-compatible with pi05_base.
         # The 18-D franka+xhand state/action is padded before entering the model.
@@ -2035,6 +2230,26 @@ _CONFIGS = [
         data=LeRobotFrankaXHandDataConfig(
             repo_id="/data/datasets/merge",
             assets=AssetsConfig(asset_id="/data/datasets/merge"),
+            base_config=DataConfig(prompt_from_task=True),
+            use_delta_ee_actions=True,
+            use_delta_hand_actions=False,
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("/data/p0_ckpt/pi05_base/params"),
+        num_train_steps=30_000,
+        batch_size=32,
+        log_interval=100,
+        save_interval=5000,
+        keep_period=10_000,
+        num_workers=4,
+    ),
+    TrainConfig(
+        name="pi05_franka_xhand_flower_380_single",
+        # Keep action_dim=32 to stay checkpoint-compatible with pi05_base.
+        # The 18-D franka+xhand state/action is padded before entering the model.
+        model=pi0_config.Pi0Config(pi05=True),
+        data=LeRobotFrankaXHandDataConfig(
+            repo_id="/data/datasets/flower_380_single",
+            assets=AssetsConfig(asset_id="/data/datasets/flower_380_single"),
             base_config=DataConfig(prompt_from_task=True),
             use_delta_ee_actions=True,
             use_delta_hand_actions=False,
@@ -2082,6 +2297,366 @@ _CONFIGS = [
         keep_period=10_000,
         num_workers=4,
     ),
+    TrainConfig(
+        name="pi05_franka_xhand_flower_200_double",
+        # Keep action_dim=32 to stay checkpoint-compatible with pi05_base.
+        # The 18-D franka+xhand state/action is padded before entering the model.
+        model=pi0_config.Pi0Config(pi05=True),
+        data=LeRobotFrankaXHandDataConfig(
+            repo_id="/data/datasets/flower_200_double",
+            assets=AssetsConfig(asset_id="/data/datasets/flower_200_double"),
+            base_config=DataConfig(prompt_from_task=True),
+            use_delta_ee_actions=True,
+            use_delta_hand_actions=False,
+            repack_transforms=_transforms.Group(
+                inputs=[
+                    _transforms.RepackTransform(
+                        {
+                            "images": {
+                                "cam_side": "observation.images.cam_side",
+                                "cam_wrist": "observation.images.cam_wrist",
+                            },
+                            "state": "observation.state",
+                            "actions": "action",
+                            "prompt": "task",
+                        }
+                    )
+                ]
+            )
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("/data/p0_ckpt/pi05_base/params"),
+        num_train_steps=30_000,
+        batch_size=32,
+        log_interval=100,
+        save_interval=5000,
+        keep_period=10_000,
+        num_workers=4,
+    ),
+    TrainConfig(
+        name="pi05_franka_xhand_flower_200_single",
+        # Keep action_dim=32 to stay checkpoint-compatible with pi05_base.
+        # The 18-D franka+xhand state/action is padded before entering the model.
+        model=pi0_config.Pi0Config(pi05=True),
+        data=LeRobotFrankaXHandDataConfig(
+            repo_id="/data/datasets/flower_200_single",
+            assets=AssetsConfig(asset_id="/data/datasets/flower_200_single"),
+            base_config=DataConfig(prompt_from_task=True),
+            use_delta_ee_actions=True,
+            use_delta_hand_actions=False,
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("/data/p0_ckpt/pi05_base/params"),
+        num_train_steps=30_000,
+        batch_size=32,
+        log_interval=100,
+        save_interval=5000,
+        keep_period=10_000,
+        num_workers=4,
+    ),
+    TrainConfig(
+        name="pi05_franka_xhand_flower_4_30_double",
+        # Keep action_dim=32 to stay checkpoint-compatible with pi05_base.
+        # The 18-D franka+xhand state/action is padded before entering the model.
+        model=pi0_config.Pi0Config(pi05=True),
+        data=LeRobotFrankaXHandDataConfig(
+            repo_id="/data/datasets/flower_4_30_double",
+            assets=AssetsConfig(asset_id="/data/datasets/flower_4_30_double"),
+            base_config=DataConfig(prompt_from_task=True),
+            use_delta_ee_actions=True,
+            use_delta_hand_actions=False,
+            repack_transforms=_transforms.Group(
+                inputs=[
+                    _transforms.RepackTransform(
+                        {
+                            "images": {
+                                "cam_side": "observation.images.cam_side",
+                                "cam_wrist": "observation.images.cam_wrist",
+                            },
+                            "state": "observation.state",
+                            "actions": "action",
+                            "prompt": "task",
+                        }
+                    )
+                ]
+            )
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("/data/p0_ckpt/pi05_base/params"),
+        num_train_steps=30_000,
+        batch_size=32,
+        log_interval=100,
+        save_interval=5000,
+        keep_period=10_000,
+        num_workers=4,
+    ),
+    TrainConfig(
+        name="pi05_franka_xhand_flower_putdown_200_double",
+        # Keep action_dim=32 to stay checkpoint-compatible with pi05_base.
+        # The 18-D franka+xhand state/action is padded before entering the model.
+        model=pi0_config.Pi0Config(pi05=True),
+        data=LeRobotFrankaXHandDataConfig(
+            repo_id="/data/datasets/flower_putdown_200_double",
+            assets=AssetsConfig(asset_id="/data/datasets/flower_putdown_200_double"),
+            base_config=DataConfig(prompt_from_task=True),
+            use_delta_ee_actions=True,
+            use_delta_hand_actions=False,
+            repack_transforms=_transforms.Group(
+                inputs=[
+                    _transforms.RepackTransform(
+                        {
+                            "images": {
+                                "cam_side": "observation.images.cam_side",
+                                "cam_wrist": "observation.images.cam_wrist",
+                            },
+                            "state": "observation.state",
+                            "actions": "action",
+                            "prompt": "task",
+                        }
+                    )
+                ]
+            )
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("/data/p0_ckpt/pi05_base/params"),
+        num_train_steps=30_000,
+        batch_size=32,
+        log_interval=100,
+        save_interval=5000,
+        keep_period=10_000,
+        num_workers=4,
+    ),
+    TrainConfig(
+        name="pi05_franka_xhand_flower_5_6_prompt",
+        # Keep action_dim=32 to stay checkpoint-compatible with pi05_base.
+        # The 18-D franka+xhand state/action is padded before entering the model.
+        model=pi0_config.Pi0Config(pi05=True),
+        data=LeRobotFrankaXHandDataConfig(
+            repo_id="/data/datasets/flower_5_6_merge",
+            assets=AssetsConfig(asset_id="pi05_franka_xhand_flower_5_6_prompt"),
+            base_config=DataConfig(prompt_from_task=True),
+            use_delta_ee_actions=True,
+            use_delta_hand_actions=False,
+            repack_transforms=_transforms.Group(
+                inputs=[
+                    _transforms.RepackTransform(
+                        {
+                            "images": {
+                                "cam_side": "observation.images.cam_side",
+                                "cam_wrist": "observation.images.cam_wrist",
+                            },
+                            "state": "observation.state",
+                            "actions": "action",
+                            "prompt": "task",
+                        }
+                    )
+                ]
+            )
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("/data/p0_ckpt/pi05_base/params"),
+        num_train_steps=30_000,
+        batch_size=32,
+        log_interval=100,
+        save_interval=5000,
+        keep_period=10_000,
+        num_workers=4,
+    ),
+    TrainConfig(
+        name="pi05_franka_xhand_flower_long_65_double",
+        # Keep action_dim=32 to stay checkpoint-compatible with pi05_base.
+        # The 18-D franka+xhand state/action is padded before entering the model.
+        model=pi0_config.Pi0Config(pi05=True),
+        data=LeRobotFrankaXHandDataConfig(
+            repo_id="/data/datasets/flower_long_65_double",
+            assets=AssetsConfig(asset_id="/data/datasets/flower_long_65_double"),
+            base_config=DataConfig(prompt_from_task=True),
+            use_delta_ee_actions=True,
+            use_delta_hand_actions=False,
+            repack_transforms=_transforms.Group(
+                inputs=[
+                    _transforms.RepackTransform(
+                        {
+                            "images": {
+                                "cam_side": "observation.images.cam_side",
+                                "cam_wrist": "observation.images.cam_wrist",
+                            },
+                            "state": "observation.state",
+                            "actions": "action",
+                            "prompt": "task",
+                        }
+                    )
+                ]
+            )
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("/data/p0_ckpt/pi05_base/params"),
+        num_train_steps=30_000,
+        batch_size=32,
+        log_interval=100,
+        save_interval=5000,
+        keep_period=10_000,
+        num_workers=4,
+    ),
+
+    TrainConfig(
+        name="pi05_franka_xhand_ego_merge_120",
+        # Keep action_dim=32 to stay checkpoint-compatible with pi05_base.
+        # The 18-D franka+xhand state/action is padded before entering the model.
+        model=pi0_config.Pi0Config(pi05=True),
+        data=LeRobotFrankaXHandDataConfig(
+            repo_id="/data/datasets/xhand_franka_lerobot/ego_merge_120",
+            assets=AssetsConfig(asset_id="/data/datasets/xhand_franka_lerobot/ego_merge_120"),
+            base_config=DataConfig(prompt_from_task=True),
+            use_delta_ee_actions=True,
+            use_delta_hand_actions=False,
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("/data/p0_ckpt/pi05_base/params"),
+        num_train_steps=30_000,
+        batch_size=32,
+        log_interval=100,
+        save_interval=5000,
+        keep_period=10_000,
+        num_workers=4,
+    ),
+    TrainConfig(
+        name="pi05_franka_xhand_ego_merge_100_adjusted_3",
+        # Keep action_dim=32 to stay checkpoint-compatible with pi05_base.
+        # The 18-D franka+xhand state/action is padded before entering the model.
+        model=pi0_config.Pi0Config(pi05=True),
+        data=LeRobotFrankaXHandDataConfig(
+            repo_id="/data/datasets/ego_merge_100_3",
+            assets=AssetsConfig(asset_id="/data/datasets/ego_merge_100_3"),
+            base_config=DataConfig(prompt_from_task=True),
+            use_delta_ee_actions=True,
+            use_delta_hand_actions=False,
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("/data/p0_ckpt/pi05_base/params"),
+        num_train_steps=30_000,
+        batch_size=32,
+        log_interval=100,
+        save_interval=5000,
+        keep_period=10_000,
+        num_workers=4,
+    ),
+    TrainConfig(
+        name="pi05_franka_xhand_ego_merge_100_adjusted",
+        # Keep action_dim=32 to stay checkpoint-compatible with pi05_base.
+        # The 18-D franka+xhand state/action is padded before entering the model.
+        model=pi0_config.Pi0Config(pi05=True),
+        data=LeRobotFrankaXHandDataConfig(
+            repo_id="/data/datasets/xhand_franka_lerobot_adjusted/ego_merge_100_adjusted",
+            assets=AssetsConfig(asset_id="/data/datasets/xhand_franka_lerobot_adjusted/ego_merge_100_adjusted"),
+            base_config=DataConfig(prompt_from_task=True),
+            use_delta_ee_actions=True,
+            use_delta_hand_actions=False,
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("/data/p0_ckpt/pi05_base/params"),
+        num_train_steps=30_000,
+        batch_size=32,
+        log_interval=100,
+        save_interval=5000,
+        keep_period=10_000,
+        num_workers=4,
+    ),
+
+    TrainConfig(
+        name="pi05_franka_xhand_ego_merge_full",
+        # Keep action_dim=32 to stay checkpoint-compatible with pi05_base.
+        # The 18-D franka+xhand state/action is padded before entering the model.
+        model=pi0_config.Pi0Config(pi05=True),
+        data=LeRobotFrankaXHandDataConfig(
+            repo_id="/data/datasets/xhand_franka_lerobot_human_x2_zminus008/merge_ego_full",
+            assets=AssetsConfig(asset_id="/data/datasets/xhand_franka_lerobot_human_x2_zminus008/merge_ego_full"),
+            base_config=DataConfig(prompt_from_task=True),
+            use_delta_ee_actions=True,
+            use_delta_hand_actions=False,
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("/data/p0_ckpt/pi05_base/params"),
+        num_train_steps=30_000,
+        batch_size=32,
+        log_interval=100,
+        save_interval=5000,
+        keep_period=10_000,
+        num_workers=4,
+    ),
+    TrainConfig(
+        name="pi05_franka_xhand_ego_merge_full_adjusted_3",
+        # Keep action_dim=32 to stay checkpoint-compatible with pi05_base.
+        # The 18-D franka+xhand state/action is padded before entering the model.
+        model=pi0_config.Pi0Config(pi05=True),
+        data=LeRobotFrankaXHandDataConfig(
+            repo_id="/data/datasets/ego_merge_full_adjusted_3",
+            assets=AssetsConfig(asset_id="/data/datasets/ego_merge_full_adjusted_3"),
+            base_config=DataConfig(prompt_from_task=True),
+            use_delta_ee_actions=True,
+            use_delta_hand_actions=False,
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("/data/p0_ckpt/pi05_base/params"),
+        num_train_steps=30_000,
+        batch_size=32,
+        log_interval=100,
+        save_interval=5000,
+        keep_period=10_000,
+        num_workers=4,
+    ),
+        TrainConfig(
+        name="pi05_franka_xhand_ego_mix_40",
+        # Keep action_dim=32 to stay checkpoint-compatible with pi05_base.
+        # The 18-D franka+xhand state/action is padded before entering the model.
+        model=pi0_config.Pi0Config(pi05=True),
+        data=LeRobotFrankaXHandDataConfig(
+            repo_id="/data/datasets/ego_mix_40_merged",
+            assets=AssetsConfig(asset_id="/data/datasets/ego_mix_40_merged"),
+            base_config=DataConfig(prompt_from_task=True),
+            use_delta_ee_actions=True,
+            use_delta_hand_actions=False,
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("/data/p0_ckpt/pi05_base/params"),
+        num_train_steps=30_000,
+        batch_size=32,
+        log_interval=100,
+        save_interval=5000,
+        keep_period=10_000,
+        num_workers=4,
+    ),
+
+    TrainConfig(
+        name="pi05_franka_xhand_ego_mix_100",
+        # Keep action_dim=32 to stay checkpoint-compatible with pi05_base.
+        # The 18-D franka+xhand state/action is padded before entering the model.
+        model=pi0_config.Pi0Config(pi05=True),
+        data=LeRobotFrankaXHandDataConfig(
+            repo_id="/data/datasets/ego_mix_100_merged",
+            assets=AssetsConfig(asset_id="/data/datasets/ego_mix_100_merged"),
+            base_config=DataConfig(prompt_from_task=True),
+            use_delta_ee_actions=True,
+            use_delta_hand_actions=False,
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("/data/p0_ckpt/pi05_base/params"),
+        num_train_steps=30_000,
+        batch_size=32,
+        log_interval=100,
+        save_interval=5000,
+        keep_period=10_000,
+        num_workers=4,
+    ),
+    
+    TrainConfig(
+        name="pi05_franka_xhand_ego_mix_200",
+        # Keep action_dim=32 to stay checkpoint-compatible with pi05_base.
+        # The 18-D franka+xhand state/action is padded before entering the model.
+        model=pi0_config.Pi0Config(pi05=True),
+        data=LeRobotFrankaXHandDataConfig(
+            repo_id="/data/datasets/ego_mix_200_merged",
+            assets=AssetsConfig(asset_id="pi05_franka_xhand_ego_mix_200"),
+            base_config=DataConfig(prompt_from_task=True),
+            use_delta_ee_actions=True,
+            use_delta_hand_actions=False,
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("/data/p0_ckpt/pi05_base/params"),
+        num_train_steps=30_000,
+        batch_size=32,
+        log_interval=100,
+        save_interval=5000,
+        keep_period=10_000,
+        num_workers=4,
+    ),
+
     TrainConfig(
         # This config is for fine-tuning pi05-DROID on a custom (smaller) DROID dataset.
         # Here, we use LeRobot data format (like for all other fine-tuning examples)

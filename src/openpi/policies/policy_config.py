@@ -72,6 +72,17 @@ def create_trained_policy(
         except ImportError:
             pytorch_device = "cpu"
 
+    rtc_action_stats = None
+    rtc_relative_action_mask = None
+    if isinstance(train_config.data, _config.LeRobotFrankaXHandDataConfig):
+        rtc_action_stats = norm_stats.get("actions")
+        if rtc_action_stats is None:
+            raise ValueError("Franka+XHand RTC requires action normalization statistics")
+        rtc_relative_action_mask = (
+            (train_config.data.use_delta_ee_actions,) * 6
+            + (train_config.data.use_delta_hand_actions,) * (train_config.data.action_dim - 6)
+        )
+
     return _policy.Policy(
         model,
         transforms=[
@@ -91,4 +102,7 @@ def create_trained_policy(
         metadata=train_config.policy_metadata,
         is_pytorch=is_pytorch,
         pytorch_device=pytorch_device if is_pytorch else None,
+        rtc_action_stats=rtc_action_stats,
+        rtc_relative_action_mask=rtc_relative_action_mask,
+        rtc_use_quantile_norm=data_config.use_quantile_norm,
     )

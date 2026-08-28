@@ -1,4 +1,5 @@
 import logging
+from typing import Literal
 
 import einops
 import flax.nnx as nnx
@@ -8,6 +9,7 @@ import jax.numpy as jnp
 from typing_extensions import override
 
 from openpi.models import model as _model
+from openpi.models.exp_rtc import DEFAULT_PREFIX_ATTENTION_HORIZON, guide_velocity
 from openpi.models import pi0_config
 import openpi.models.gemma as _gemma
 import openpi.models.siglip as _siglip
@@ -221,6 +223,11 @@ class Pi0(_model.BaseModel):
         *,
         num_steps: int | at.Int[at.Array, ""] = 10,
         noise: at.Float[at.Array, "b ah ad"] | None = None,
+        previous_action_chunk: at.Float[at.Array, "b ah ad"] | None = None,
+        inference_delay: int | at.Int[at.Array, ""] = 0,
+        prefix_attention_horizon: int | None = None,
+        prefix_attention_schedule: Literal["linear", "exp", "ones", "zeros"] = "exp",
+        max_guidance_weight: float = 5.0,
     ) -> _model.Actions:
         observation = _model.preprocess_observation(None, observation, train=False)
         # note that we use the convention more common in diffusion literature, where t=1 is noise and t=0 is the target
@@ -229,6 +236,8 @@ class Pi0(_model.BaseModel):
         batch_size = observation.state.shape[0]
         if noise is None:
             noise = jax.random.normal(rng, (batch_size, self.action_horizon, self.action_dim))
+        if prefix_attention_horizon is None:
+            prefix_attention_horizon = DEFAULT_PREFIX_ATTENTION_HORIZON
 
         # first fill KV cache with a forward pass of the prefix
         prefix_tokens, prefix_mask, prefix_ar_mask = self.embed_prefix(observation)
@@ -236,8 +245,7 @@ class Pi0(_model.BaseModel):
         positions = jnp.cumsum(prefix_mask, axis=1) - 1
         _, kv_cache = self.PaliGemma.llm([prefix_tokens, None], mask=prefix_attn_mask, positions=positions)
 
-        def step(carry):
-            x_t, time = carry
+        def denoise(x_t, time):
             suffix_tokens, suffix_mask, suffix_ar_mask, adarms_cond = self.embed_suffix(
                 observation, x_t, jnp.broadcast_to(time, batch_size)
             )
@@ -267,6 +275,23 @@ class Pi0(_model.BaseModel):
             )
             assert prefix_out is None
             v_t = self.action_out_proj(suffix_out[:, -self.action_horizon :])
+            return x_t - time * v_t, v_t
+
+        def step(carry):
+            x_t, time = carry
+            if previous_action_chunk is None:
+                _, v_t = denoise(x_t, time)
+            else:
+                v_t = guide_velocity(
+                    denoise,
+                    x_t,
+                    time,
+                    previous_action_chunk,
+                    inference_delay=inference_delay,
+                    prefix_attention_horizon=prefix_attention_horizon,
+                    prefix_attention_schedule=prefix_attention_schedule,
+                    max_guidance_weight=max_guidance_weight,
+                )
 
             return x_t + dt * v_t, time + dt
 
