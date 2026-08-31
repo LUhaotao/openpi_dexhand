@@ -184,7 +184,23 @@ class Pi0(_model.BaseModel):
             time_emb = self.time_mlp_out(time_emb)
             time_emb = nnx.swish(time_emb)
             action_expert_tokens = action_tokens
-            adarms_cond = time_emb
+            if not self.discrete_state_input and timestep.ndim > 1:
+                # The state token is a static condition, so use the clean flow
+                # timestep while action tokens retain their token-wise times.
+                clean_timestep = jnp.zeros((timestep.shape[0],), dtype=timestep.dtype)
+                clean_time_emb = posemb_sincos(
+                    clean_timestep,
+                    self.action_in_proj.out_features,
+                    min_period=4e-3,
+                    max_period=4.0,
+                )
+                clean_time_emb = self.time_mlp_in(clean_time_emb)
+                clean_time_emb = nnx.swish(clean_time_emb)
+                clean_time_emb = self.time_mlp_out(clean_time_emb)
+                clean_time_emb = nnx.swish(clean_time_emb)
+                adarms_cond = jnp.concatenate([clean_time_emb[:, None, :], time_emb], axis=1)
+            else:
+                adarms_cond = time_emb
         else:
             # mix timestep + action information using an MLP (no adaRMS)
             time_tokens = time_emb if self.streaming else einops.repeat(time_emb, "b emb -> b s emb", s=self.action_horizon)

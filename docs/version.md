@@ -26,6 +26,8 @@
 
 - [*] 将状态通过一个mlp转换到fm一侧，无论训练还是推理时，和噪声token一同前向，**这里后期最好进行一个是否滑动窗口的实验**（使用action同样尺寸的encoder，一个简单的线性层，可以考虑是否切换成**mlp**）
 
+目前这里state归一化直接引入了一个额外的干净timestep emb，这会导致AdaRMS归一化偏向近端action带来问题，需要考虑别的注入方式-**AdaLN**，或者考虑**使用Mask提供clean action语义**
+
 ## version 0.1.2
 
 实现**推理时streaming噪声调度**：

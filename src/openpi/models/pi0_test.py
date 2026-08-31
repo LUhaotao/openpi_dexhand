@@ -4,6 +4,7 @@ import jax.numpy as jnp
 import numpy as np
 
 from openpi.models.pi0 import _chunk_wise_timestep
+from openpi.models.pi0 import posemb_sincos
 import openpi.models.pi0_config as _pi0_config
 
 
@@ -88,6 +89,39 @@ def test_pi05_continuous_state_uses_independent_state_projection_token():
     assert suffix_tokens.shape == (1, 1 + config.action_horizon, 64)
     assert suffix_mask.shape == (1, 1 + config.action_horizon)
     assert jnp.allclose(suffix_tokens[:, :1], expected_state_token)
+
+
+def test_pi05_continuous_state_uses_clean_timestep_condition():
+    key = jax.random.key(0)
+    config = _pi0_config.Pi0Config(
+        pi05=True,
+        streaming=True,
+        discrete_state_input=False,
+        paligemma_variant="dummy",
+        action_expert_variant="dummy",
+        action_horizon=3,
+    )
+    model = config.create(key)
+    observation, actions = config.fake_obs(batch_size=1), config.fake_act(batch_size=1)
+    noisy_actions = jnp.zeros((1, config.action_horizon, config.action_dim), dtype=jnp.float32)
+    timestep = jnp.asarray([[0.2, 0.5, 0.8]], dtype=jnp.float32)
+
+    _, _, _, adarms_cond = model.embed_suffix(observation, noisy_actions, timestep)
+
+    assert adarms_cond.shape == (1, 1 + config.action_horizon, 64)
+    clean_time = jnp.zeros((1,), dtype=timestep.dtype)
+    clean_time_emb = posemb_sincos(
+        clean_time,
+        model.action_in_proj.out_features,
+        min_period=4e-3,
+        max_period=4.0,
+    )
+    clean_cond = model.time_mlp_out(jax.nn.silu(model.time_mlp_in(clean_time_emb)))
+    clean_cond = jax.nn.silu(clean_cond)
+    assert jnp.allclose(adarms_cond[:, 0], clean_cond)
+
+    loss = model.compute_loss(key, observation, actions)
+    assert loss.shape == (1, config.action_horizon)
 
 
 def test_checkpoint_loader_keeps_new_state_projection_initialized(tmp_path, monkeypatch):
