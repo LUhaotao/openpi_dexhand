@@ -1,8 +1,16 @@
 import numpy as np
 import pytest
 import tree
+import jax  # noqa: F401
 
 from openpi_client import msgpack_numpy
+
+
+def test_bfloat16_round_trip_preserves_dtype_and_bytes():
+    values = np.asarray([1.0, 2.0], dtype=np.dtype("bfloat16"))
+    restored = msgpack_numpy.unpackb(msgpack_numpy.packb(values))
+    assert restored.dtype.name == "bfloat16"
+    assert np.array_equal(restored, values)
 
 
 def _check(expected, actual):

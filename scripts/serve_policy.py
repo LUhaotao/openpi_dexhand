@@ -8,7 +8,7 @@ import tyro
 
 from openpi.policies import policy as _policy
 from openpi.policies import policy_config as _policy_config
-from openpi.policies.multiprocess import MultiProcessPolicy
+from openpi.policies.multi_process_policy import MultiProcessPolicy
 from openpi.serving import websocket_policy_server
 from openpi.training import config as _config
 
@@ -56,6 +56,7 @@ class Args:
     # Start separate VLM and FM websocket servers. The default path is unchanged.
     multi_process: bool = False
     vlm_port: int | None = None
+    vlm_host: str = "127.0.0.1"
 
     # Specifies how to load the policy. If not provided, the default policy for the environment will be used.
     policy: Checkpoint | Default = dataclasses.field(default_factory=Default)
@@ -95,11 +96,32 @@ def create_policy(args: Args) -> _policy.Policy:
     """Create a policy from the given arguments."""
     match args.policy:
         case Checkpoint():
+            train_config = _multi_process_config(args, _config.get_config(args.policy.config))
             return _policy_config.create_trained_policy(
-                _config.get_config(args.policy.config), args.policy.dir, default_prompt=args.default_prompt
+                train_config, args.policy.dir, default_prompt=args.default_prompt
             )
         case Default():
-            return create_default_policy(args.env, default_prompt=args.default_prompt)
+            checkpoint = DEFAULT_CHECKPOINT[args.env]
+            train_config = _multi_process_config(args, _config.get_config(checkpoint.config))
+            return _policy_config.create_trained_policy(
+                train_config, checkpoint.dir, default_prompt=args.default_prompt
+            )
+
+
+def _multi_process_config(args: Args, train_config: _config.TrainConfig) -> _config.TrainConfig:
+    """Use fresh continuous state in the FM suffix for split Pi05 inference."""
+    model = train_config.model
+    if (
+        args.multi_process
+        and isinstance(model, _config.pi0_config.Pi0Config)
+        and model.pi05
+        and model.discrete_state_input
+    ):
+        return dataclasses.replace(
+            train_config,
+            model=dataclasses.replace(model, discrete_state_input=False),
+        )
+    return train_config
 
 
 def main(args: Args) -> None:
@@ -129,7 +151,9 @@ def main(args: Args) -> None:
 
 def _serve_multi_process_role(args: Args, role: str, port: int) -> None:
     policy = create_policy(args)
-    role_policy = MultiProcessPolicy(policy, role)
+    role_policy = MultiProcessPolicy(
+        policy, role, vlm_host=args.vlm_host, vlm_port=args.vlm_port
+    )
     metadata = {**policy.metadata, "multi_process_role": role}
     server = websocket_policy_server.WebsocketPolicyServer(
         policy=role_policy,

@@ -28,6 +28,8 @@
 
 - [] 允许streaming与滑动窗口
 
+- [] 部分导入与异步推理
+
 ## 阶段总结
 
 self-forcing专门提到diffusion forcing预先去噪未来状态带来的问题 —— 新增控制对未来输出**控制能力不够**，self-forcing将这种情况描述为 **premature commitment（早熟）**，认为其**降低了生成的交互性**，在我们实际使用中同样发现diffusion forcing类方法推理的**一致性太强**，导致**惯性特别大**

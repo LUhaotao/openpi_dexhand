@@ -19,14 +19,15 @@ import numpy as np
 
 
 def pack_array(obj):
-    if (isinstance(obj, (np.ndarray, np.generic))) and obj.dtype.kind in ("V", "O", "c"):
+    if (isinstance(obj, (np.ndarray, np.generic))) and obj.dtype.kind in ("O", "c"):
         raise ValueError(f"Unsupported dtype: {obj.dtype}")
 
     if isinstance(obj, np.ndarray):
+        dtype = obj.dtype.name if obj.dtype.name == "bfloat16" else obj.dtype.str
         return {
             b"__ndarray__": True,
             b"data": obj.tobytes(),
-            b"dtype": obj.dtype.str,
+            b"dtype": dtype,
             b"shape": obj.shape,
         }
 
@@ -42,7 +43,8 @@ def pack_array(obj):
 
 def unpack_array(obj):
     if b"__ndarray__" in obj:
-        return np.ndarray(buffer=obj[b"data"], dtype=np.dtype(obj[b"dtype"]), shape=obj[b"shape"])
+        dtype = np.dtype("bfloat16") if obj[b"dtype"] == "bfloat16" else np.dtype(obj[b"dtype"])
+        return np.ndarray(buffer=obj[b"data"], dtype=dtype, shape=obj[b"shape"])
 
     if b"__npgeneric__" in obj:
         return np.dtype(obj[b"dtype"]).type(obj[b"data"])

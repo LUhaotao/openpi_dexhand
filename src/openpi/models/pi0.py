@@ -75,6 +75,7 @@ class Pi0(_model.BaseModel):
     def __init__(self, config: pi0_config.Pi0Config, rngs: nnx.Rngs):
         super().__init__(config.action_dim, config.action_horizon, config.max_token_len)
         self.pi05 = config.pi05
+        self.discrete_state_input = config.discrete_state_input
         self.streaming = config.streaming
         self.streaming_chunk_size = config.streaming_chunk_size
         self.streaming_constant_weight = config.streaming_constant_weight
@@ -160,15 +161,20 @@ class Pi0(_model.BaseModel):
         input_mask = []
         ar_mask = []
         tokens = []
-        if not self.pi05:
+        if not self.pi05 or not self.discrete_state_input:
             # add a single state token
-            state_token = self.state_proj(obs.state)[:, None, :]
+            state_token = (
+                self.state_proj(obs.state)
+                if not self.pi05
+                else self.action_in_proj(obs.state)
+            )[:, None, :]
             tokens.append(state_token)
             input_mask.append(jnp.ones((obs.state.shape[0], 1), dtype=jnp.bool_))
             # image/language inputs do not attend to state or actions
             ar_mask += [True]
 
         action_tokens = self.action_in_proj(noisy_actions)
+        action_horizon = noisy_actions.shape[1]
         # embed timestep using sine-cosine positional encoding with sensitivity in the range [0, 1]
         time_emb = posemb_sincos(timestep, self.action_in_proj.out_features, min_period=4e-3, max_period=4.0)
         if self.pi05:
@@ -191,7 +197,7 @@ class Pi0(_model.BaseModel):
         tokens.append(action_expert_tokens)
         input_mask.append(jnp.ones(action_expert_tokens.shape[:2], dtype=jnp.bool_))
         # image/language/state inputs do not attend to action tokens
-        ar_mask += [True] + ([False] * (self.action_horizon - 1))
+        ar_mask += [True] + ([False] * (action_horizon - 1))
         tokens = jnp.concatenate(tokens, axis=1)
         input_mask = jnp.concatenate(input_mask, axis=1)
         ar_mask = jnp.array(ar_mask)
@@ -328,7 +334,9 @@ class Pi0(_model.BaseModel):
         noise: at.Float[at.Array, "b ah ad"] | None = None,
     ) -> _model.Actions:
         """Run flow matching using a prefix KV cache produced by ``encode_prefix``."""
-        kv_cache = jax.tree.map(jnp.asarray, prefix_cache["kv_cache"])
+        kv_cache = jax.tree.map(
+            lambda value: jnp.asarray(value, dtype=jnp.bfloat16), prefix_cache["kv_cache"]
+        )
         prefix_pad_masks = jnp.asarray(prefix_cache["prefix_pad_mask"], dtype=jnp.bool_)
         batch_size = state.shape[0]
         if noise is None:
@@ -355,7 +363,7 @@ class Pi0(_model.BaseModel):
                 kv_cache=kv_cache,
                 adarms_cond=[None, adarms_cond],
             )
-            v_t = self.action_out_proj(suffix_out[:, -self.action_horizon :])
+            v_t = self.action_out_proj(suffix_out[:, -noise.shape[1] :])
             return x_t + dt * v_t, time + dt
 
         def cond(carry):
