@@ -37,6 +37,7 @@ result = client.infer_fm(observation)
 
 server：
 ```bash
+XLA_PYTHON_CLIENT_PREALLOCATE=false \
 .venv/bin/python scripts/serve_policy.py \
   --multi-process \
   --port 8000 \
@@ -57,7 +58,7 @@ client：
   --warmup 3 \
   --runs 10
 # 这里warmup是指先运行3次推理
-# runs表示前向10次，vlm没有实装runs
-# num-steps表示总共运行多少次计算均值
+# num-steps表示前向10次，vlm没有实装num-steps
+# runs表示总共运行多少次计算均值
 # noise-tokens表示去噪的token数
 ```

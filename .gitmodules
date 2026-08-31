@@ -6,4 +6,7 @@
 	url = https://github.com/Lifelong-Robot-Learning/LIBERO.git
 [submodule "third_party/pi-r2-GR00T"]
 	path = third_party/pi-r2-GR00T
-	url = https://github.com/Yenomal/pi-r2-GR00T.git
+	url = https://github.com/pi-r2-flow/Isaac-GR00T.git
+[submodule "third_party/openpi_tactile"]
+	path = third_party/openpi_tactile
+	url = https://github.com/Ynao3/openpi_tactile.git

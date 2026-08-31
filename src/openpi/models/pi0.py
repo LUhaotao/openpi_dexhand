@@ -330,7 +330,7 @@ class Pi0(_model.BaseModel):
         state: at.Float[at.Array, "b s"],
         prefix_cache: dict,
         *,
-        num_steps: int = 10,
+        num_steps: int | at.Int[at.Array, ""] = 10,
         noise: at.Float[at.Array, "b ah ad"] | None = None,
     ) -> _model.Actions:
         """Run flow matching using a prefix KV cache produced by ``encode_prefix``."""
