@@ -1,6 +1,7 @@
 import flax.nnx as nnx
 import jax
 import jax.numpy as jnp
+import numpy as np
 
 from openpi.models.pi0 import _chunk_wise_timestep
 import openpi.models.pi0_config as _pi0_config
@@ -64,3 +65,46 @@ def test_pi05_streaming_training_accepts_tokenwise_timestep():
 
     loss = model.compute_loss(key, obs, act)
     assert loss.shape == (1, config.action_horizon)
+
+
+def test_pi05_continuous_state_uses_independent_state_projection_token():
+    key = jax.random.key(0)
+    config = _pi0_config.Pi0Config(
+        pi05=True,
+        discrete_state_input=False,
+        paligemma_variant="dummy",
+        action_expert_variant="dummy",
+        action_horizon=3,
+    )
+    model = config.create(key)
+    observation, _ = config.fake_obs(batch_size=1), config.fake_act(batch_size=1)
+    noisy_actions = jnp.zeros((1, config.action_horizon, config.action_dim), dtype=jnp.float32)
+    timestep = jnp.ones((1,), dtype=jnp.float32)
+
+    suffix_tokens, suffix_mask, _, _ = model.embed_suffix(observation, noisy_actions, timestep)
+
+    expected_state_token = model.state_proj(observation.state)[:, None, :]
+    assert model.state_proj is not model.action_in_proj
+    assert suffix_tokens.shape == (1, 1 + config.action_horizon, 64)
+    assert suffix_mask.shape == (1, 1 + config.action_horizon)
+    assert jnp.allclose(suffix_tokens[:, :1], expected_state_token)
+
+
+def test_checkpoint_loader_keeps_new_state_projection_initialized(tmp_path, monkeypatch):
+    from openpi.models import model as _model
+    from openpi.training import weight_loaders
+
+    loaded = {"action_in_proj": {"kernel": np.ones((32, 1024), dtype=np.float32)}}
+    monkeypatch.setattr(_model, "restore_params", lambda *args, **kwargs: loaded)
+    monkeypatch.setattr(weight_loaders.download, "maybe_download", lambda path: tmp_path)
+
+    loader = weight_loaders.CheckpointWeightLoader("unused")
+    params = {
+        "action_in_proj": {"kernel": np.zeros((32, 1024), dtype=np.float32)},
+        "state_proj": {"kernel": np.full((32, 1024), 7.0, dtype=np.float32)},
+    }
+
+    result = loader.load(params)
+
+    assert np.all(result["action_in_proj"]["kernel"] == 1.0)
+    assert np.all(result["state_proj"]["kernel"] == 7.0)

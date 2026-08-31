@@ -52,7 +52,7 @@ client：
 ```bash
 .venv/bin/python scripts/test_multi_process_latency.py \
   --mode fm \
-  --environment franka_xhand \
+  --environment franka_xhand_continuous_state \
   --num-steps 10 \
   --noise-tokens 1 \
   --warmup 3 \
@@ -61,4 +61,12 @@ client：
 # num-steps表示前向10次，vlm没有实装num-steps
 # runs表示总共运行多少次计算均值
 # noise-tokens表示去噪的token数
+```
+
+### 训练
+```bash
+# 有一个脚本可以用
+# train_pi05_dex.sh
+
+
 ```

@@ -25,7 +25,7 @@ def build_zero_observation(
 ) -> dict[str, Any]:
     """Build a zero-valued observation for a supported OpenPI input transform."""
     image = np.zeros((height, width, 3), dtype=np.uint8)
-    if environment == "franka_xhand":
+    if environment in {"franka_xhand", "franka_xhand_continuous_state"}:
         return {
             "images": {"cam_side": image.copy(), "cam_wrist": image.copy()},
             "state": np.zeros(state_dim, dtype=np.float32),
@@ -72,7 +72,11 @@ def main() -> None:
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--fm-port", type=int, default=8000)
     parser.add_argument("--vlm-port", type=int, default=8001)
-    parser.add_argument("--environment", choices=("franka_xhand", "droid"), default="franka_xhand")
+    parser.add_argument(
+        "--environment",
+        choices=("franka_xhand_continuous_state", "franka_xhand", "droid"),
+        default="franka_xhand_continuous_state",
+    )
     parser.add_argument("--mode", choices=("vlm", "fm", "both"), default="both")
     parser.add_argument("--runs", type=int, default=20)
     parser.add_argument("--warmup", type=int, default=3)

@@ -394,7 +394,7 @@ class Module(nn.Module):
         embedded: Sequence[at.Float[at.Array, "b _t _d"] | None],
         positions: at.Int[at.Array, "b t"],
         mask: at.Bool[at.Array, "b t s"],
-        adarms_cond: Sequence[at.Float[at.Array, "b _d"] | None] | None = None,
+        adarms_cond: Sequence[at.Float[at.Array, "b ... _d"] | None] | None = None,
         *,
         kv_cache: KVCache | None = None,
         deterministic: bool = True,

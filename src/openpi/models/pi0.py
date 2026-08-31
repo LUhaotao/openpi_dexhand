@@ -104,6 +104,10 @@ class Pi0(_model.BaseModel):
         self.PaliGemma = nnx.Dict(llm=llm, img=img)
         self.action_in_proj = nnx.Linear(config.action_dim, action_expert_config.width, rngs=rngs)
         if config.pi05:
+            if not self.discrete_state_input:
+                # Continuous Pi05 state uses its own projection so it can learn a
+                # state-specific representation independently from noisy actions.
+                self.state_proj = nnx.Linear(config.action_dim, action_expert_config.width, rngs=rngs)
             self.time_mlp_in = nnx.Linear(action_expert_config.width, action_expert_config.width, rngs=rngs)
             self.time_mlp_out = nnx.Linear(action_expert_config.width, action_expert_config.width, rngs=rngs)
         else:
@@ -163,11 +167,7 @@ class Pi0(_model.BaseModel):
         tokens = []
         if not self.pi05 or not self.discrete_state_input:
             # add a single state token
-            state_token = (
-                self.state_proj(obs.state)
-                if not self.pi05
-                else self.action_in_proj(obs.state)
-            )[:, None, :]
+            state_token = self.state_proj(obs.state)[:, None, :]
             tokens.append(state_token)
             input_mask.append(jnp.ones((obs.state.shape[0], 1), dtype=jnp.bool_))
             # image/language inputs do not attend to state or actions
