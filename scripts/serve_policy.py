@@ -3,6 +3,7 @@ import enum
 import logging
 import multiprocessing
 import socket
+from typing import Literal
 
 import tyro
 
@@ -57,6 +58,8 @@ class Args:
     multi_process: bool = False
     vlm_port: int | None = None
     vlm_host: str = "127.0.0.1"
+    # Serve one role only. Use this to pin VLM and FM to separate GPUs.
+    multi_process_role: Literal["vlm", "fm"] | None = None
 
     # Specifies how to load the policy. If not provided, the default policy for the environment will be used.
     policy: Checkpoint | Default = dataclasses.field(default_factory=Default)
@@ -125,6 +128,13 @@ def _multi_process_config(args: Args, train_config: _config.TrainConfig) -> _con
 
 
 def main(args: Args) -> None:
+    if args.multi_process_role is not None:
+        if args.multi_process:
+            raise ValueError("Use either multi_process or multi_process_role, not both")
+        if args.multi_process_role == "fm" and args.vlm_port is None:
+            raise ValueError("vlm_port is required when serving the FM role")
+        _serve_multi_process_role(args, args.multi_process_role, args.port)
+        return
     if args.multi_process:
         _serve_multi_process(args)
         return

@@ -64,4 +64,4 @@ RTC-pir2 体现了 teacher-forcing 到 diffusion-forcing 的过程
 
 引入仿真作为实验环境：
 
-- [] 搭建UniVTAC仿真环境并测试推理时通路、延迟
+- [*] 搭建UniVTAC仿真环境并测试推理时通路、延迟

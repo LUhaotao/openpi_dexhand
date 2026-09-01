@@ -38,17 +38,19 @@ def episode_paths(source_dir: Path) -> list[Path]:
     return sorted(paths, key=lambda path: int(path.stem))
 
 
-def create_dataset(output_dir: Path, fps: int, first_episode: Path) -> LeRobotDataset:
+def create_dataset(
+    output_dir: Path, fps: int, first_episode: Path, cameras: dict[str, str], mode: str
+) -> LeRobotDataset:
     with h5py.File(first_episode, "r") as h5:
         state_dim = h5["embodiment/joint"].shape[1]
         features = {
             "observation.state": {"dtype": "float32", "shape": (state_dim,), "names": None},
             "action": {"dtype": "float32", "shape": (state_dim,), "names": None},
         }
-        for name, path in CAMERAS.items():
+        for name, path in cameras.items():
             image = decode_rgb(h5[path][0], path)
             features[f"observation.images.{name}"] = {
-                "dtype": "video",
+                "dtype": mode,
                 "shape": (3, *image.shape[:2]),
                 "names": ["channels", "height", "width"],
             }
@@ -59,12 +61,22 @@ def create_dataset(output_dir: Path, fps: int, first_episode: Path) -> LeRobotDa
         robot_type="univtac_franka_gripper",
         fps=fps,
         features=features,
-        use_videos=True,
+        use_videos=mode == "video",
     )
 
 
-def convert(source_dir: Path, output_dir: Path, task: str, fps: int, resume: bool, max_episodes: int | None) -> None:
+def convert(
+    source_dir: Path,
+    output_dir: Path,
+    task: str,
+    fps: int,
+    resume: bool,
+    max_episodes: int | None,
+    no_tactile: bool,
+    mode: str,
+) -> None:
     episodes = episode_paths(source_dir)
+    cameras = CAMERAS if not no_tactile else {"head": CAMERAS["head"], "wrist": CAMERAS["wrist"]}
     if max_episodes is not None:
         episodes = episodes[:max_episodes]
 
@@ -72,9 +84,15 @@ def convert(source_dir: Path, output_dir: Path, task: str, fps: int, resume: boo
         if not resume:
             raise FileExistsError(f"{output_dir} exists; pass --resume to continue it")
         dataset = LeRobotDataset(output_dir.name, root=output_dir)
+        expected_images = {f"observation.images.{name}" for name in cameras}
+        existing_images = {name for name in dataset.meta.features if name.startswith("observation.images.")}
+        if existing_images != expected_images or dataset.fps != fps:
+            raise ValueError("Existing dataset cameras or fps differ; use a separate output directory")
+        if any(dataset.meta.features[name]["dtype"] != mode for name in expected_images):
+            raise ValueError("Existing dataset storage mode differs; use a separate output directory")
         start = dataset.num_episodes
     else:
-        dataset = create_dataset(output_dir, fps, episodes[0])
+        dataset = create_dataset(output_dir, fps, episodes[0], cameras, mode)
         start = 0
 
     for episode_path in episodes[start:]:
@@ -82,7 +100,7 @@ def convert(source_dir: Path, output_dir: Path, task: str, fps: int, resume: boo
             joints = h5["embodiment/joint"][:].astype(np.float32, copy=False)
             if len(joints) < 2:
                 raise ValueError(f"{episode_path} has fewer than two frames")
-            for path in CAMERAS.values():
+            for path in cameras.values():
                 if len(h5[path]) != len(joints):
                     raise ValueError(f"{episode_path}: {path} length does not match embodiment/joint")
 
@@ -93,7 +111,7 @@ def convert(source_dir: Path, output_dir: Path, task: str, fps: int, resume: boo
                     "action": joints[frame_index + 1],
                     "task": task,
                 }
-                for name, path in CAMERAS.items():
+                for name, path in cameras.items():
                     frame[f"observation.images.{name}"] = decode_rgb(h5[path][frame_index], path)
                 dataset.add_frame(frame)
             dataset.save_episode()
@@ -106,6 +124,8 @@ def main() -> None:
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--task", default="grasp and classify an object by tactile feedback")
     parser.add_argument("--fps", type=int, default=60)
+    parser.add_argument("--mode", choices=("video", "image"), default="video")
+    parser.add_argument("--no-tactile", action="store_true", help="Keep only head and wrist cameras")
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--max-episodes", type=int)
     args = parser.parse_args()
