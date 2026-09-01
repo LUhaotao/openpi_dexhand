@@ -46,6 +46,8 @@ class Pi0Config(_model.BaseModelConfig):
             object.__setattr__(self, "discrete_state_input", self.pi05)
         if self.streaming_chunk_size < 1:
             raise ValueError("streaming_chunk_size must be positive")
+        if self.streaming_chunk_size > self.action_horizon:
+            raise ValueError("streaming_chunk_size must not exceed action_horizon")
         if self.streaming_constant_weight < 0 or self.streaming_chunk_wise_weight < 0:
             raise ValueError("streaming regime weights must be non-negative")
         if self.streaming and self.streaming_constant_weight + self.streaming_chunk_wise_weight <= 0:

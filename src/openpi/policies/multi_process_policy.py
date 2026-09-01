@@ -18,6 +18,13 @@ from openpi.shared import nnx_utils
 
 
 @dataclasses.dataclass
+class _StreamingState:
+    session_id: str
+    execution_id: int
+    action_window: Any
+
+
+@dataclasses.dataclass
 class MultiProcessPolicy:
     policy: _policy.Policy
     role: Literal["vlm", "fm"]
@@ -31,10 +38,15 @@ class MultiProcessPolicy:
         self._cache_id = 0
         self._cache_version: str | None = None
         self._prefix_cache: dict[str, Any] | None = None
+        # ponytail: one active stream per FM server; use a session map only for multi-robot serving.
+        self._streaming_state: _StreamingState | None = None
         self._vlm_client = None
         self._encode_prefix_jit = nnx_utils.module_jit(self.policy._model.encode_prefix)  # noqa: SLF001
         self._sample_actions_from_prefix_jit = nnx_utils.module_jit(
             self.policy._model.sample_actions_from_prefix  # noqa: SLF001
+        )
+        self._advance_streaming_actions_from_prefix_jit = nnx_utils.module_jit(
+            self.policy._model.advance_streaming_actions_from_prefix  # noqa: SLF001
         )
 
     @property
@@ -83,6 +95,10 @@ class MultiProcessPolicy:
 
         if op == "refresh_prefix":
             return self._refresh_prefix(request)
+        if op == "reset_stream":
+            return self._reset_stream(request)
+        if op == "stream_infer":
+            return self._stream_infer(request)
         if op != "infer":
             raise ValueError(f"Unsupported FM operation: {op}")
         return self._infer_fm(request)
@@ -104,12 +120,104 @@ class MultiProcessPolicy:
         self._prefix_cache = jax.device_put(cache)
         self._cache_id = int(envelope["cache_id"])
         self._cache_version = envelope["cache_version"]
+        self._streaming_state = None
         return {
             "protocol_version": 1,
             "cache_id": self._cache_id,
             "cache_version": self._cache_version,
             "status": "active",
         }
+
+    def _reset_stream(self, request: dict[str, Any]) -> dict[str, Any]:
+        session_id = request.get("session_id", "default")
+        if not isinstance(session_id, str) or not session_id:
+            raise ValueError("session_id must be a non-empty string")
+        self._streaming_state = None
+        return {"protocol_version": 1, "session_id": session_id, "status": "reset"}
+
+    def _stream_infer(self, request: dict[str, Any]) -> dict[str, Any]:
+        if self._prefix_cache is None or self._cache_version is None:
+            raise RuntimeError("No active prefix cache; call refresh_prefix first")
+        expected = request.get("expected_cache_version")
+        if expected is not None and expected != self._cache_version:
+            raise ValueError(
+                f"Cache version mismatch: expected {expected!r}, active {self._cache_version!r}"
+            )
+        model = self.policy._model  # noqa: SLF001
+        if not getattr(model, "streaming", False):
+            raise ValueError("stream_infer requires a checkpoint configured with model.streaming=True")
+
+        session_id = request.get("session_id", "default")
+        execution_id = request.get("executed_action_id")
+        if not isinstance(session_id, str) or not session_id:
+            raise ValueError("session_id must be a non-empty string")
+        if not isinstance(execution_id, int) or isinstance(execution_id, bool) or execution_id < 0:
+            raise ValueError("executed_action_id must be a non-negative integer")
+
+        model_observation = self._prepare(request["observation"])
+        if self._streaming_state is None:
+            self._streaming_state = self._seed_streaming_state(
+                session_id,
+                execution_id,
+                model_observation.state,
+                num_steps=int(request.get("num_steps", 10)),
+            )
+        elif self._streaming_state.session_id != session_id:
+            raise RuntimeError("A different stream session is active; call reset_stream first")
+        else:
+            completed_actions = execution_id - self._streaming_state.execution_id
+            if completed_actions < 0:
+                raise ValueError("executed_action_id cannot move backwards within a stream session")
+            chunk_size = int(model.streaming_chunk_size)
+            if completed_actions % chunk_size:
+                raise ValueError("executed_action_id must advance by whole streaming chunks")
+            if completed_actions:
+                self._rng, advance_rng = jax.random.split(self._rng)
+                self._streaming_state.action_window = self._advance_streaming_actions_from_prefix_jit(
+                    advance_rng,
+                    model_observation.state,
+                    self._prefix_cache,
+                    self._streaming_state.action_window,
+                    jnp.asarray(completed_actions // chunk_size, dtype=jnp.int32),
+                )
+                self._streaming_state.execution_id = execution_id
+
+        chunk_size = int(model.streaming_chunk_size)
+        actions = self._streaming_state.action_window[:, :chunk_size]
+        result = self.policy._output_transform(  # noqa: SLF001
+            {"state": np.asarray(model_observation.state[0]), "actions": np.asarray(actions[0])}
+        )
+        result["streaming"] = {
+            "protocol_version": 1,
+            "session_id": session_id,
+            "execution_id": execution_id,
+            "cache_version": self._cache_version,
+            "action_count": chunk_size,
+        }
+        return result
+
+    def _seed_streaming_state(
+        self,
+        session_id: str,
+        execution_id: int,
+        state: jax.Array,
+        *,
+        num_steps: int,
+    ) -> _StreamingState:
+        if num_steps <= 0:
+            raise ValueError("num_steps must be positive")
+        self._rng, sample_rng, noise_rng = jax.random.split(self._rng, 3)
+        actions = self._sample_actions_from_prefix_jit(
+            sample_rng,
+            state,
+            self._prefix_cache,
+            num_steps=num_steps,
+        )
+        timestep = self.policy._model.streaming_timestep(actions.dtype)  # noqa: SLF001
+        noise = jax.random.normal(noise_rng, actions.shape, dtype=actions.dtype)
+        # ponytail: seed from a full sample plus the training marginal; retain an ODE trajectory only if cold starts need it.
+        action_window = timestep[None, :, None] * noise + (1.0 - timestep[None, :, None]) * actions
+        return _StreamingState(session_id, execution_id, action_window)
 
     def _infer_fm(self, request: dict[str, Any]) -> dict[str, Any]:
         if self._prefix_cache is None or self._cache_version is None:

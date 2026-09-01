@@ -32,9 +32,9 @@
 
 实现**推理时streaming噪声调度**：
 
-- [] 允许streaming与滑动窗口
+- [*] 允许streaming与滑动窗口
 
-- [] 部分导入与异步推理，需要配合云端推理使用，**部分导入不是必须而是优化选项**
+- [] 部分导入与异步推理，需要配合云端推理使用，**部分导入不是必须而是优化选项**，使用UniVTAC配合测试云端推理
 
 ## 阶段总结
 
@@ -56,7 +56,7 @@ RTC-pir2 体现了 teacher-forcing 到 diffusion-forcing 的过程
 
 增加触觉进入fm部分：
 
-- [] 确定使用什么触觉模态（Xsense提供了多种模态，Xhand只有三轴力模态，UniVTAC也有多种模态，我们只需要考虑三轴力、RGB、Marker）
+- [] 确定使用什么触觉模态（Xsense提供了多种模态，Xhand只有三轴力模态，UniVTAC也有多种模态，我们只需要考虑三轴力、RGB、Marker、deformation map）没有必要考虑baseline用的什么模态，要注意我们方便编码
 
 - [] 触觉encoder
 

@@ -13,3 +13,13 @@
 [submodule "third_party/pi06star"]
 	path = third_party/pi06star
 	url = https://github.com/zywang03/pi06star.git
+[submodule "third_party/pi-r2-flow"]
+	path = third_party/pi-r2-flow
+	url = https://github.com/pi-r2-flow/pi-r2-flow
+[submodule "third_party/Robot_Lab"]
+	path = third_party/Robot_Lab
+	url = https://github.com/YesAI-Manipulation/Robot_Lab.git
+	branch = dex_franka
+[submodule "third_party/UniVTAC"]
+	path = third_party/UniVTAC
+	url = git@github.com:Yenomal/UniVTAC.git

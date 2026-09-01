@@ -25,6 +25,24 @@ def build_fm_request(
     return request
 
 
+def build_stream_request(
+    observation: dict[str, Any],
+    cache_version: str,
+    *,
+    session_id: str,
+    executed_action_id: int,
+    num_steps: int = 10,
+) -> dict[str, Any]:
+    return {
+        "op": "stream_infer",
+        "observation": observation,
+        "expected_cache_version": cache_version,
+        "session_id": session_id,
+        "executed_action_id": executed_action_id,
+        "num_steps": num_steps,
+    }
+
+
 class MultiProcessClient:
     """Synchronously coordinates a VLM server and an FM server."""
 
@@ -62,5 +80,28 @@ class MultiProcessClient:
                 self._cache_version,
                 num_steps=num_steps,
                 noise_tokens=noise_tokens,
+            )
+        )
+
+    def reset_stream(self, session_id: str = "default") -> dict[str, Any]:
+        return self._fm.infer({"op": "reset_stream", "session_id": session_id})
+
+    def infer_stream(
+        self,
+        observation: dict[str, Any],
+        *,
+        session_id: str,
+        executed_action_id: int,
+        num_steps: int = 10,
+    ) -> dict[str, Any]:
+        if not hasattr(self, "_cache_version"):
+            raise RuntimeError("Call update_vlm() before infer_stream().")
+        return self._fm.infer(
+            build_stream_request(
+                observation,
+                self._cache_version,
+                session_id=session_id,
+                executed_action_id=executed_action_id,
+                num_steps=num_steps,
             )
         )

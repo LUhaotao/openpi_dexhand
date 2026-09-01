@@ -44,3 +44,18 @@ def test_fm_request_can_select_noise_token_count():
     request = build_fm_request({}, "v1", num_steps=4, noise_tokens=1)
     assert request["num_steps"] == 4
     assert request["noise_tokens"] == 1
+
+
+def test_stream_request_only_carries_stream_identity_and_execution_clock():
+    from scripts.multi_process_client import build_stream_request
+
+    request = build_stream_request({}, "v1", session_id="episode-3", executed_action_id=12)
+
+    assert request == {
+        "op": "stream_infer",
+        "observation": {},
+        "expected_cache_version": "v1",
+        "session_id": "episode-3",
+        "executed_action_id": 12,
+        "num_steps": 10,
+    }

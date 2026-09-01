@@ -71,6 +71,20 @@ def _chunk_wise_timestep(action_horizon: int, chunk_size: int, dtype=jnp.float32
     ).astype(dtype)
 
 
+def _shift_streaming_window(
+    actions: _model.Actions,
+    velocity: _model.Actions,
+    timestep: at.Float[at.Array, "..."],
+    fresh_noise: _model.Actions,
+) -> _model.Actions:
+    """Advance a diffusion-forcing action window by one configured chunk."""
+    chunk_size = fresh_noise.shape[1]
+    next_actions = actions[:, chunk_size:] + (
+        timestep[:-chunk_size] - timestep[chunk_size:]
+    )[None, :, None] * velocity[:, chunk_size:]
+    return jnp.concatenate([next_actions, fresh_noise], axis=1)
+
+
 class Pi0(_model.BaseModel):
     def __init__(self, config: pi0_config.Pi0Config, rngs: nnx.Rngs):
         super().__init__(config.action_dim, config.action_horizon, config.max_token_len)
@@ -350,10 +364,6 @@ class Pi0(_model.BaseModel):
         noise: at.Float[at.Array, "b ah ad"] | None = None,
     ) -> _model.Actions:
         """Run flow matching using a prefix KV cache produced by ``encode_prefix``."""
-        kv_cache = jax.tree.map(
-            lambda value: jnp.asarray(value, dtype=jnp.bfloat16), prefix_cache["kv_cache"]
-        )
-        prefix_pad_masks = jnp.asarray(prefix_cache["prefix_pad_mask"], dtype=jnp.bool_)
         batch_size = state.shape[0]
         if noise is None:
             noise = jax.random.normal(rng, (batch_size, self.action_horizon, self.action_dim))
@@ -362,24 +372,12 @@ class Pi0(_model.BaseModel):
 
         def step(carry):
             x_t, time = carry
-            suffix_observation = _model.Observation(
-                images={}, image_masks={}, state=state,
+            v_t = self._velocity_from_prefix(
+                state,
+                prefix_cache,
+                x_t,
+                jnp.broadcast_to(time, batch_size),
             )
-            suffix_tokens, suffix_mask, suffix_ar_mask, adarms_cond = self.embed_suffix(
-                suffix_observation, x_t, jnp.broadcast_to(time, batch_size)
-            )
-            suffix_attn_mask = make_attn_mask(suffix_mask, suffix_ar_mask)
-            prefix_attn_mask = einops.repeat(prefix_pad_masks, "b p -> b s p", s=suffix_tokens.shape[1])
-            full_attn_mask = jnp.concatenate([prefix_attn_mask, suffix_attn_mask], axis=-1)
-            positions = jnp.sum(prefix_pad_masks, axis=-1)[:, None] + jnp.cumsum(suffix_mask, axis=-1) - 1
-            (_, suffix_out), _ = self.PaliGemma.llm(
-                [None, suffix_tokens],
-                mask=full_attn_mask,
-                positions=positions,
-                kv_cache=kv_cache,
-                adarms_cond=[None, adarms_cond],
-            )
-            v_t = self.action_out_proj(suffix_out[:, -noise.shape[1] :])
             return x_t + dt * v_t, time + dt
 
         def cond(carry):
@@ -388,3 +386,64 @@ class Pi0(_model.BaseModel):
 
         actions, _ = jax.lax.while_loop(cond, step, (noise, jnp.asarray(1.0)))
         return actions
+
+    def streaming_timestep(self, dtype=jnp.float32) -> at.Float[at.Array, "..."]:
+        return _chunk_wise_timestep(self.action_horizon, self.streaming_chunk_size, dtype=dtype)
+
+    def advance_streaming_actions_from_prefix(
+        self,
+        rng: at.KeyArrayLike,
+        state: at.Float[at.Array, "b s"],
+        prefix_cache: dict,
+        action_window: _model.Actions,
+        advance: at.Int[at.Array, ""],
+    ) -> _model.Actions:
+        """Advance a token-wise diffusion-forcing window by completed action chunks."""
+        if not self.streaming:
+            raise ValueError("Streaming inference requires a model trained with streaming=True")
+
+        timestep = self.streaming_timestep(action_window.dtype)
+        chunk_size = self.streaming_chunk_size
+
+        def step(_, carry):
+            step_rng, actions = carry
+            step_rng, noise_rng = jax.random.split(step_rng)
+            velocity = self._velocity_from_prefix(state, prefix_cache, actions, timestep[None, :])
+            fresh_noise = jax.random.normal(
+                noise_rng,
+                (actions.shape[0], chunk_size, self.action_dim),
+                dtype=actions.dtype,
+            )
+            return step_rng, _shift_streaming_window(actions, velocity, timestep, fresh_noise)
+
+        _, action_window = jax.lax.fori_loop(0, advance, step, (rng, action_window))
+        return action_window
+
+    def _velocity_from_prefix(
+        self,
+        state: at.Float[at.Array, "b s"],
+        prefix_cache: dict,
+        noisy_actions: _model.Actions,
+        timestep: at.Float[at.Array, "b ..."],
+    ) -> _model.Actions:
+        """Predict flow velocity for suffix tokens against an encoded prefix."""
+        kv_cache = jax.tree.map(
+            lambda value: jnp.asarray(value, dtype=jnp.bfloat16), prefix_cache["kv_cache"]
+        )
+        prefix_pad_masks = jnp.asarray(prefix_cache["prefix_pad_mask"], dtype=jnp.bool_)
+        suffix_observation = _model.Observation(images={}, image_masks={}, state=state)
+        suffix_tokens, suffix_mask, suffix_ar_mask, adarms_cond = self.embed_suffix(
+            suffix_observation, noisy_actions, timestep
+        )
+        suffix_attn_mask = make_attn_mask(suffix_mask, suffix_ar_mask)
+        prefix_attn_mask = einops.repeat(prefix_pad_masks, "b p -> b s p", s=suffix_tokens.shape[1])
+        full_attn_mask = jnp.concatenate([prefix_attn_mask, suffix_attn_mask], axis=-1)
+        positions = jnp.sum(prefix_pad_masks, axis=-1)[:, None] + jnp.cumsum(suffix_mask, axis=-1) - 1
+        (_, suffix_out), _ = self.PaliGemma.llm(
+            [None, suffix_tokens],
+            mask=full_attn_mask,
+            positions=positions,
+            kv_cache=kv_cache,
+            adarms_cond=[None, adarms_cond],
+        )
+        return self.action_out_proj(suffix_out[:, -noisy_actions.shape[1] :])

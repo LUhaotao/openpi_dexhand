@@ -10,7 +10,7 @@ server：
     --port 8000 \
     --vlm-port 8001 \
     policy:checkpoint \
-    --policy.config pi05_franka_xhand_flower_v2 \
+    --policy.config pi05_franka_xhand_flower_streaming \
     --policy.dir=/data/dex_ws/pi05_checkpoints/pi05_franka_xhand_flower_zhb_right_600
 ```
 
@@ -43,7 +43,7 @@ XLA_PYTHON_CLIENT_PREALLOCATE=false \
   --port 8000 \
   --vlm-port 8001 \
   policy:checkpoint \
-  --policy.config pi05_franka_xhand_flower_v2 \
+  --policy.config pi05_franka_xhand_flower_streaming \
   --policy.dir /home/rui/data/openpi_dexhand/ckpt/pi05_franka_xhand_flower_zhb_right_600/flower_zhb_right_600/29999
 ```
 
