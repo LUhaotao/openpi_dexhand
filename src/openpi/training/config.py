@@ -2007,54 +2007,15 @@ _CONFIGS = [
         keep_period=10_000,
         num_workers=0,  # Important: RLDS DataLoader requires num_workers=0, handles multi-processing internally
     ),
-    TrainConfig(
-        name="pi05_franka_xhand_flower",
-        # Keep action_dim=32 to stay checkpoint-compatible with pi05_base.
-        # The 18-D franka+xhand state/action is padded before entering the model.
-        model=pi0_config.Pi0Config(pi05=True),
-        data=LeRobotFrankaXHandDataConfig(
-            repo_id="/data/flower_franka_xhand",
-            assets=AssetsConfig(asset_id="/data/openpi-aloha/assets/pi05_franka_xhand_flower/flower_franka_xhand"),
-            base_config=DataConfig(prompt_from_task=True),
-            use_delta_ee_actions=True,
-            use_delta_hand_actions=False,
-        ),
-        weight_loader=weight_loaders.CheckpointWeightLoader("/data/p0_ckpt/pi05_base/params"),
-        num_train_steps=30_000,
-        batch_size=32,
-        log_interval=100,
-        save_interval=5000,
-        keep_period=10_000,
-        num_workers=4,
-    ),
-      TrainConfig(
-        name="pi05_franka_xhand_flower_280_single",
-        # Keep action_dim=32 to stay checkpoint-compatible with pi05_base.
-        # The 18-D franka+xhand state/action is padded before entering the model.
-        model=pi0_config.Pi0Config(pi05=True),
-        data=LeRobotFrankaXHandDataConfig(
-            repo_id="/data/datasets/merge",
-            assets=AssetsConfig(asset_id="/data/datasets/merge"),
-            base_config=DataConfig(prompt_from_task=True),
-            use_delta_ee_actions=True,
-            use_delta_hand_actions=False,
-        ),
-        weight_loader=weight_loaders.CheckpointWeightLoader("/data/p0_ckpt/pi05_base/params"),
-        num_train_steps=30_000,
-        batch_size=32,
-        log_interval=100,
-        save_interval=5000,
-        keep_period=10_000,
-        num_workers=4,
-    ),
+
     TrainConfig(
         name="pi05_franka_xhand_flower_v2",
         # Keep action_dim=32 to stay checkpoint-compatible with pi05_base.
         # The 18-D franka+xhand state/action is padded before entering the model.
-        model=pi0_config.Pi0Config(pi05=True, discrete_state_input=False),
+        model=pi0_config.Pi0Config(pi05=True),
         data=LeRobotFrankaXHandDataConfig(
-            repo_id="/data/datasets/flower_4_28",
-            assets=AssetsConfig(asset_id="/data/datasets/flower_4_28"),
+            repo_id="/public/node01/users/lvrui/datasets/lerobot/flower_xhand_franka",
+            assets=AssetsConfig(asset_id="/public/node01/users/lvrui/datasets/lerobot/flower_xhand_franka"),
             base_config=DataConfig(prompt_from_task=True),
             use_delta_ee_actions=True,
             use_delta_hand_actions=False,
@@ -2112,13 +2073,55 @@ _CONFIGS = [
         ),
         weight_loader=weight_loaders.CheckpointWeightLoader("ckpt/pi0_ckpt/pi05_base/params"),
         num_train_steps=20_000,
-        batch_size=24,
+        batch_size=32,
         log_interval=100,
         save_interval=5000,
         keep_period=10_000,
         num_workers=48,
     ),
-
+    
+    ### 以下是 UniVTAC 数据集的训练配置示例，没有 grasp_classify 任务，视情况后续做不做 insert_HDMI 任务
+    TrainConfig(
+        name="pi05_UniVTAC_insert_HDMI_streaming",
+        # Keep action_dim=32 to stay checkpoint-compatible with pi05_base.
+        # The 18-D franka+xhand state/action is padded before entering the model.
+        model=pi0_config.Pi0Config(pi05=True, discrete_state_input=False, streaming=True),
+        data=SimpleDataConfig(
+            repo_id="/public/node01/users/lvrui/datasets/lerobot/univtac/insert_HDMI",
+            assets=AssetsConfig(asset_id="/public/node01/users/lvrui/datasets/lerobot/univtac/insert_HDMI"),
+            base_config=DataConfig(
+                prompt_from_task=True,
+                action_sequence_keys = ("action",),
+                repack_transforms=_transforms.Group(
+                    inputs=[
+                        _transforms.RepackTransform(
+                            {
+                                "images": {
+                                    "cam_side": "observation.images.head",
+                                    "cam_wrist": "observation.images.wrist",
+                                },
+                                "state": "observation.state",
+                                "actions": "action",
+                                "prompt": "task",
+                            }
+                        )
+                    ]
+                ),
+            ),
+            data_transforms=lambda model: _transforms.Group(
+                inputs=[franka_xhand_policy.FrankaXHandInputs()],
+                outputs=[franka_xhand_policy.FrankaXHandOutputs(action_dim=9)],
+            ),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("ckpt/pi0_ckpt/pi05_base/params"),
+        num_train_steps=20_000,
+        batch_size=32,
+        log_interval=100,
+        save_interval=5000,
+        keep_period=10_000,
+        num_workers=48,
+    ),
+    
     TrainConfig(
         # This config is for fine-tuning pi05-DROID on a custom (smaller) DROID dataset.
         # Here, we use LeRobot data format (like for all other fine-tuning examples)

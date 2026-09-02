@@ -80,7 +80,19 @@ def convert(
     if max_episodes is not None:
         episodes = episodes[:max_episodes]
 
-    if output_dir.exists():
+    has_output = output_dir.exists() and any(output_dir.iterdir())
+    if has_output:
+        metadata_files = [
+            output_dir / "meta" / "info.json",
+            output_dir / "meta" / "tasks.jsonl",
+            output_dir / "meta" / "episodes.jsonl",
+            output_dir / "meta" / "episodes_stats.jsonl",
+        ]
+        if not all(path.is_file() for path in metadata_files):
+            raise ValueError(
+                f"{output_dir} is not a complete local LeRobot dataset; "
+                "use a new --output-dir or remove this incomplete directory"
+            )
         if not resume:
             raise FileExistsError(f"{output_dir} exists; pass --resume to continue it")
         dataset = LeRobotDataset(output_dir.name, root=output_dir)
@@ -92,6 +104,8 @@ def convert(
             raise ValueError("Existing dataset storage mode differs; use a separate output directory")
         start = dataset.num_episodes
     else:
+        if output_dir.exists():
+            output_dir.rmdir()
         dataset = create_dataset(output_dir, fps, episodes[0], cameras, mode)
         start = 0
 
@@ -122,7 +136,7 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--source-dir", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
-    parser.add_argument("--task", default="grasp and classify an object by tactile feedback")
+    parser.add_argument("--task", default="Empty")
     parser.add_argument("--fps", type=int, default=60)
     parser.add_argument("--mode", choices=("video", "image"), default="video")
     parser.add_argument("--no-tactile", action="store_true", help="Keep only head and wrist cameras")

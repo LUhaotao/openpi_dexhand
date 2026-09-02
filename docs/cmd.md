@@ -111,6 +111,13 @@ checkpoint 必须有与 UniVTAC Panda 8-D qpos 一致的 action space；否则�
     --policy.dir /path/to/streaming_checkpoint
 ```
 
+UniVTAC client命令：
+
+```bash
+
+
+```
+
 ### 训练
 ```bash
 # 有一个脚本可以用
