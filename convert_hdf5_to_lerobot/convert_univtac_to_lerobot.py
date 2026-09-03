@@ -3,6 +3,14 @@
 
 UniVTAC does not store an action field. As in its native data loader, this
 uses joint[t] as the observation and joint[t + 1] as the action.
+
+Tactile forms selectable with ``--tactile``:
+  - ``rgb``: raw GelSight RGB image (JPEG bytes)
+  - ``rgb_marker``: RGB image with tracked markers drawn on it (JPEG bytes)
+  - ``depth``: float32 depth/deformation map
+  - ``marker``: float32 marker coordinates
+  - ``pose``: float32 tactile sensor pose
+  - ``all``: all five forms; repeat ``--tactile`` to choose a subset
 """
 
 from __future__ import annotations
@@ -13,15 +21,23 @@ from pathlib import Path
 import cv2
 import h5py
 import numpy as np
+
 from lerobot.common.datasets.lerobot_dataset import LeRobotDataset
 
 
 CAMERAS = {
     "head": "observation/head/rgb",
     "wrist": "observation/wrist/rgb",
-    "tactile_left": "tactile/left_gsmini/rgb",
-    "tactile_right": "tactile/right_gsmini/rgb",
 }
+
+TACTILE_FORMS = {
+    "rgb": ("tactile_left", "tactile/left_gsmini/rgb", "image"),
+    "rgb_marker": ("tactile_left_rgb_marker", "tactile/left_gsmini/rgb_marker", "image"),
+    "depth": ("tactile_left_depth", "tactile/left_gsmini/depth", "numeric"),
+    "marker": ("tactile_left_marker", "tactile/left_gsmini/marker", "numeric"),
+    "pose": ("tactile_left_pose", "tactile/left_gsmini/pose", "numeric"),
+}
+TACTILE_SIDES = (("left", "left_gsmini"), ("right", "right_gsmini"))
 
 
 def decode_rgb(encoded: bytes, name: str) -> np.ndarray:
@@ -29,6 +45,20 @@ def decode_rgb(encoded: bytes, name: str) -> np.ndarray:
     if image is None:
         raise ValueError(f"Cannot decode JPEG from {name}")
     return cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+
+
+def selected_features(tactile_forms: list[str]) -> list[tuple[str, str, str]]:
+    features = [(f"observation.images.{name}", path, "image") for name, path in CAMERAS.items()]
+    tactile_forms = list(TACTILE_FORMS) if "all" in tactile_forms else list(dict.fromkeys(tactile_forms))
+    for form in tactile_forms:
+        _, _, kind = TACTILE_FORMS[form]
+        for side, sensor in TACTILE_SIDES:
+            name, _, _ = TACTILE_FORMS[form]
+            name = name.replace("left", side)
+            path = f"tactile/{sensor}/{form}"
+            feature_name = f"observation.images.{name}" if kind == "image" else f"observation.tactile.{name}"
+            features.append((feature_name, path, kind))
+    return features
 
 
 def episode_paths(source_dir: Path) -> list[Path]:
@@ -39,28 +69,36 @@ def episode_paths(source_dir: Path) -> list[Path]:
 
 
 def create_dataset(
-    output_dir: Path, fps: int, first_episode: Path, cameras: dict[str, str], mode: str
+    output_dir: Path, fps: int, first_episode: Path, features: list[tuple[str, str, str]], mode: str
 ) -> LeRobotDataset:
     with h5py.File(first_episode, "r") as h5:
         state_dim = h5["embodiment/joint"].shape[1]
-        features = {
+        feature_defs = {
             "observation.state": {"dtype": "float32", "shape": (state_dim,), "names": None},
             "action": {"dtype": "float32", "shape": (state_dim,), "names": None},
         }
-        for name, path in cameras.items():
-            image = decode_rgb(h5[path][0], path)
-            features[f"observation.images.{name}"] = {
-                "dtype": mode,
-                "shape": (3, *image.shape[:2]),
-                "names": ["channels", "height", "width"],
-            }
+        for feature_name, path, kind in features:
+            if kind == "image":
+                image = decode_rgb(h5[path][0], path)
+                feature_defs[feature_name] = {
+                    "dtype": mode,
+                    "shape": (3, *image.shape[:2]),
+                    "names": ["channels", "height", "width"],
+                }
+            else:
+                value = np.asarray(h5[path][0])
+                feature_defs[feature_name] = {
+                    "dtype": "float32",
+                    "shape": value.shape,
+                    "names": None,
+                }
 
     return LeRobotDataset.create(
         repo_id=output_dir.name,
         root=output_dir,
         robot_type="univtac_franka_gripper",
         fps=fps,
-        features=features,
+        features=feature_defs,
         use_videos=mode == "video",
     )
 
@@ -70,13 +108,18 @@ def convert(
     output_dir: Path,
     task: str,
     fps: int,
+    *,
     resume: bool,
     max_episodes: int | None,
     no_tactile: bool,
+    tactile: list[str] | None,
     mode: str,
 ) -> None:
     episodes = episode_paths(source_dir)
-    cameras = CAMERAS if not no_tactile else {"head": CAMERAS["head"], "wrist": CAMERAS["wrist"]}
+    if no_tactile and tactile:
+        raise ValueError("--no-tactile cannot be combined with --tactile")
+    tactile_forms = [] if no_tactile else (tactile or ["rgb"])
+    features = selected_features(tactile_forms)
     if max_episodes is not None:
         episodes = episodes[:max_episodes]
 
@@ -96,17 +139,22 @@ def convert(
         if not resume:
             raise FileExistsError(f"{output_dir} exists; pass --resume to continue it")
         dataset = LeRobotDataset(output_dir.name, root=output_dir)
-        expected_images = {f"observation.images.{name}" for name in cameras}
-        existing_images = {name for name in dataset.meta.features if name.startswith("observation.images.")}
-        if existing_images != expected_images or dataset.fps != fps:
-            raise ValueError("Existing dataset cameras or fps differ; use a separate output directory")
+        expected_features = {name for name, _, _ in features}
+        existing_features = {
+            name
+            for name in dataset.meta.features
+            if name.startswith(("observation.images.", "observation.tactile."))
+        }
+        if existing_features != expected_features or dataset.fps != fps:
+            raise ValueError("Existing dataset modalities or fps differ; use a separate output directory")
+        expected_images = {name for name, _, kind in features if kind == "image"}
         if any(dataset.meta.features[name]["dtype"] != mode for name in expected_images):
             raise ValueError("Existing dataset storage mode differs; use a separate output directory")
         start = dataset.num_episodes
     else:
         if output_dir.exists():
             output_dir.rmdir()
-        dataset = create_dataset(output_dir, fps, episodes[0], cameras, mode)
+        dataset = create_dataset(output_dir, fps, episodes[0], features, mode)
         start = 0
 
     for episode_path in episodes[start:]:
@@ -114,7 +162,7 @@ def convert(
             joints = h5["embodiment/joint"][:].astype(np.float32, copy=False)
             if len(joints) < 2:
                 raise ValueError(f"{episode_path} has fewer than two frames")
-            for path in cameras.values():
+            for _, path, _ in features:
                 if len(h5[path]) != len(joints):
                     raise ValueError(f"{episode_path}: {path} length does not match embodiment/joint")
 
@@ -125,8 +173,11 @@ def convert(
                     "action": joints[frame_index + 1],
                     "task": task,
                 }
-                for name, path in cameras.items():
-                    frame[f"observation.images.{name}"] = decode_rgb(h5[path][frame_index], path)
+                for feature_name, path, kind in features:
+                    value = h5[path][frame_index]
+                    frame[feature_name] = (
+                        decode_rgb(value, path) if kind == "image" else np.asarray(value, dtype=np.float32)
+                    )
                 dataset.add_frame(frame)
             dataset.save_episode()
         print(f"converted {episode_path.name}")
@@ -139,6 +190,12 @@ def main() -> None:
     parser.add_argument("--task", default="Empty")
     parser.add_argument("--fps", type=int, default=60)
     parser.add_argument("--mode", choices=("video", "image"), default="video")
+    parser.add_argument(
+        "--tactile",
+        choices=(*TACTILE_FORMS, "all"),
+        action="append",
+        help="Tactile form to keep; repeat for multiple forms. Default: rgb. Use --tactile all for all forms.",
+    )
     parser.add_argument("--no-tactile", action="store_true", help="Keep only head and wrist cameras")
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--max-episodes", type=int)

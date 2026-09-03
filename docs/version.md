@@ -36,6 +36,10 @@
 
 - [] 部分导入与异步推理，需要配合云端推理使用，**部分导入不是必须而是优化选项**，使用UniVTAC配合测试云端推理
 
+## version 0.1.2 fix
+
+补充fm server侧异步刷新kvcache
+
 ## 阶段总结
 
 self-forcing专门提到diffusion forcing预先去噪未来状态带来的问题 —— 新增控制对未来输出**控制能力不够**，self-forcing将这种情况描述为 **premature commitment（早熟）**，认为其**降低了生成的交互性**，在我们实际使用中同样发现diffusion forcing类方法推理的**一致性太强**，导致**惯性特别大**

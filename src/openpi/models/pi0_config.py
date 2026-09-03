@@ -29,11 +29,9 @@ class Pi0Config(_model.BaseModelConfig):
     # - the state input is part of the discrete language tokens rather than a continuous input that is part of the suffix
     # - the action expert uses adaRMSNorm to inject the flow matching timestep
     pi05: bool = False
-    # Optional streaming-style training with a per-action-position noise schedule.
+    # Optional streaming-style training with a per-chunk noise schedule.
     streaming: bool = False
     streaming_chunk_size: int = 1
-    streaming_constant_weight: float = 0.2
-    streaming_chunk_wise_weight: float = 0.8
     # This config option is not used directly by the model, but it is read by the ModelTransformFactory.
     discrete_state_input: bool = None  # type: ignore
 
@@ -48,10 +46,8 @@ class Pi0Config(_model.BaseModelConfig):
             raise ValueError("streaming_chunk_size must be positive")
         if self.streaming_chunk_size > self.action_horizon:
             raise ValueError("streaming_chunk_size must not exceed action_horizon")
-        if self.streaming_constant_weight < 0 or self.streaming_chunk_wise_weight < 0:
-            raise ValueError("streaming regime weights must be non-negative")
-        if self.streaming and self.streaming_constant_weight + self.streaming_chunk_wise_weight <= 0:
-            raise ValueError("At least one streaming regime weight must be positive")
+        if self.streaming and self.action_horizon % self.streaming_chunk_size:
+            raise ValueError("action_horizon must be divisible by streaming_chunk_size")
         if self.pytorch_compile_mode is not None:
             assert self.pytorch_compile_mode in [
                 "default",

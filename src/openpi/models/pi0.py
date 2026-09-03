@@ -59,16 +59,29 @@ def posemb_sincos(
 
 
 def _chunk_wise_timestep(action_horizon: int, chunk_size: int, dtype=jnp.float32) -> at.Float[at.Array, "..."]:
-    """Return the GR00T ``pir2`` ramp in OpenPI's noise-time convention."""
-    chunk_size = max(int(chunk_size), 1)
-    ramp_width = max(action_horizon - 2 * chunk_size, 1)
-    position = jnp.arange(action_horizon, dtype=dtype)
-    ramp = (position - chunk_size + 0.5) / ramp_width
-    return jnp.where(
-        position < chunk_size,
-        0.0,
-        jnp.where(position >= action_horizon - chunk_size, 1.0, ramp),
-    ).astype(dtype)
+    """Return FlashVLA's deterministic equal-width chunk schedule."""
+    num_chunks, remainder = divmod(int(action_horizon), int(chunk_size))
+    if remainder:
+        raise ValueError("action_horizon must be divisible by chunk_size")
+    chunk_time = (jnp.arange(num_chunks, dtype=jnp.float32) + 1.0) / num_chunks
+    return jnp.repeat(chunk_time, chunk_size).astype(dtype)
+
+
+def _sample_chunk_wise_timestep(
+    rng: at.KeyArrayLike,
+    batch_shape: tuple[int, ...],
+    action_horizon: int,
+    chunk_size: int,
+    dtype=jnp.float32,
+) -> at.Float[at.Array, "..."]:
+    """Sample one Beta timestep per chunk from its equal-width interval."""
+    num_chunks, remainder = divmod(int(action_horizon), int(chunk_size))
+    if remainder:
+        raise ValueError("action_horizon must be divisible by chunk_size")
+    samples = jax.random.beta(rng, 1.5, 1.0, (*batch_shape, num_chunks))
+    starts = jnp.arange(num_chunks, dtype=samples.dtype) / num_chunks
+    chunk_time = 0.001 + 0.999 * (starts + samples / num_chunks)
+    return jnp.repeat(chunk_time, chunk_size, axis=-1).astype(dtype)
 
 
 def _shift_streaming_window(
@@ -92,8 +105,6 @@ class Pi0(_model.BaseModel):
         self.discrete_state_input = config.discrete_state_input
         self.streaming = config.streaming
         self.streaming_chunk_size = config.streaming_chunk_size
-        self.streaming_constant_weight = config.streaming_constant_weight
-        self.streaming_chunk_wise_weight = config.streaming_chunk_wise_weight
         paligemma_config = _gemma.get_config(config.paligemma_variant)
         action_expert_config = _gemma.get_config(config.action_expert_variant)
         # TODO: rewrite gemma in NNX. For now, use bridge.
@@ -237,28 +248,19 @@ class Pi0(_model.BaseModel):
     def compute_loss(
         self, rng: at.KeyArrayLike, observation: _model.Observation, actions: _model.Actions, *, train: bool = False
     ) -> at.Float[at.Array, "*b ah"]:
-        preprocess_rng, noise_rng, time_rng, regime_rng = jax.random.split(rng, 4)
+        preprocess_rng, noise_rng, time_rng = jax.random.split(rng, 3)
         observation = _model.preprocess_observation(preprocess_rng, observation, train=train)
 
         batch_shape = actions.shape[:-2]
         noise = jax.random.normal(noise_rng, actions.shape)
         if self.streaming:
-            constant_weight = self.streaming_constant_weight
-            chunk_weight = self.streaming_chunk_wise_weight
-            total_weight = constant_weight + chunk_weight
-            if total_weight <= 0:
-                raise ValueError("At least one streaming regime weight must be positive")
-            use_chunk_wise = jax.random.uniform(regime_rng) < (chunk_weight / total_weight)
-            constant_time = jax.random.beta(time_rng, 1.5, 1, batch_shape) * 0.999 + 0.001
-            chunk_time = jnp.broadcast_to(
-                _chunk_wise_timestep(
-                    self.action_horizon,
-                    self.streaming_chunk_size,
-                    dtype=actions.dtype,
-                ),
-                (*batch_shape, self.action_horizon),
+            time = _sample_chunk_wise_timestep(
+                time_rng,
+                batch_shape,
+                self.action_horizon,
+                self.streaming_chunk_size,
+                dtype=actions.dtype,
             )
-            time = jnp.where(use_chunk_wise, chunk_time, constant_time[..., None])
         else:
             time = jax.random.beta(time_rng, 1.5, 1, batch_shape) * 0.999 + 0.001
         time_expanded = time[..., None] if self.streaming else time[..., None, None]

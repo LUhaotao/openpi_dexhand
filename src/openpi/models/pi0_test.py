@@ -6,6 +6,7 @@ import pytest
 
 from openpi.models.pi0 import Pi0
 from openpi.models.pi0 import _chunk_wise_timestep
+from openpi.models.pi0 import _sample_chunk_wise_timestep
 from openpi.models.pi0 import _shift_streaming_window
 from openpi.models.pi0 import posemb_sincos
 import openpi.models.pi0_config as _pi0_config
@@ -53,12 +54,23 @@ def test_pi0_all_lora():
     assert all("llm" in p for p in state)
 
 
-def test_chunk_wise_timestep_uses_openpi_noise_direction():
+def test_chunk_wise_timestep_uses_equal_width_chunks():
     timestep = _chunk_wise_timestep(action_horizon=8, chunk_size=2, dtype=jnp.float32)
 
-    # OpenPI uses t=0 for clean actions and t=1 for pure noise.
-    expected = jnp.asarray([0.0, 0.0, 0.125, 0.375, 0.625, 0.875, 1.0, 1.0], dtype=jnp.float32)
+    expected = jnp.asarray([0.25, 0.25, 0.5, 0.5, 0.75, 0.75, 1.0, 1.0], dtype=jnp.float32)
     assert jnp.allclose(timestep, expected)
+
+
+def test_sample_chunk_wise_timestep_shares_time_within_chunks():
+    timestep = _sample_chunk_wise_timestep(jax.random.key(0), (2,), 8, 2)
+
+    assert timestep.shape == (2, 8)
+    assert jnp.all(timestep[:, 1::2] == timestep[:, ::2])
+    starts = 0.001 + 0.999 * jnp.arange(4, dtype=jnp.float32) / 4
+    ends = 0.001 + 0.999 * (jnp.arange(4, dtype=jnp.float32) + 1) / 4
+    chunk_timestep = timestep[:, ::2]
+    assert jnp.all(chunk_timestep >= starts)
+    assert jnp.all(chunk_timestep <= ends)
 
 
 def test_shift_streaming_window_denoises_shifted_tokens_and_refills_noise():
@@ -75,6 +87,9 @@ def test_shift_streaming_window_denoises_shifted_tokens_and_refills_noise():
 def test_streaming_chunk_size_must_fit_action_horizon():
     with pytest.raises(ValueError, match="must not exceed"):
         _pi0_config.Pi0Config(action_horizon=2, streaming_chunk_size=3)
+
+    with pytest.raises(ValueError, match="must be divisible"):
+        _pi0_config.Pi0Config(action_horizon=5, streaming=True, streaming_chunk_size=2)
 
 
 def test_streaming_sampler_advances_the_window_by_completed_chunks():
