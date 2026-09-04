@@ -76,6 +76,51 @@ class MultiProcessPolicy:
         inputs = jax.tree.map(lambda x: jnp.asarray(x)[None, ...], inputs)
         return _model.Observation.from_dict(inputs)
 
+    def warmup(self) -> None:
+        """Compile the role's first inference path before accepting clients."""
+        observation = _model.Observation(
+            images={
+                key: jnp.ones((1, *_model.IMAGE_RESOLUTION, 3), dtype=jnp.float32)
+                for key in _model.IMAGE_KEYS
+            },
+            image_masks={key: jnp.ones((1,), dtype=jnp.bool_) for key in _model.IMAGE_KEYS},
+            state=jnp.ones((1, self.policy._model.action_dim), dtype=jnp.float32),  # noqa: SLF001
+            tokenized_prompt=jnp.ones((1, self.policy._model.max_token_len), dtype=jnp.int32),  # noqa: SLF001
+            tokenized_prompt_mask=jnp.ones((1, self.policy._model.max_token_len), dtype=jnp.bool_),  # noqa: SLF001
+        )
+
+        if self.role == "vlm":
+            self._block_until_ready(self._encode_prefix_jit(observation))
+            return
+
+        # eval_shape gives the FM a correctly-shaped cache without compiling the
+        # image encoder a second time in the FM process.
+        prefix_spec = jax.eval_shape(self.policy._model.encode_prefix, observation)  # noqa: SLF001
+        prefix_cache = jax.tree.map(lambda value: jnp.ones(value.shape, value.dtype), prefix_spec)
+        actions = self._sample_actions_from_prefix_jit(
+            jax.random.key(0),
+            observation.state,
+            prefix_cache,
+            num_steps=10,
+        )
+        self._block_until_ready(actions)
+        if getattr(self.policy._model, "streaming", False):  # noqa: SLF001
+            advanced = self._advance_streaming_actions_from_prefix_jit(
+                jax.random.key(1),
+                observation.state,
+                prefix_cache,
+                actions,
+                jnp.asarray(1, dtype=jnp.int32),
+            )
+            self._block_until_ready(advanced)
+
+    @staticmethod
+    def _block_until_ready(value: Any) -> Any:
+        return jax.tree.map(
+            lambda leaf: leaf.block_until_ready() if hasattr(leaf, "block_until_ready") else leaf,
+            value,
+        )
+
     def _encode_prefix(self, observation: dict[str, Any]) -> dict[str, Any]:
         model_observation = self._prepare(observation)
         cache = self._encode_prefix_jit(model_observation)

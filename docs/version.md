@@ -38,7 +38,7 @@
 
 ## version 0.1.2 fix
 
-补充fm server侧异步刷新kvcache
+- [*] 补充fm server侧异步刷新kvcache
 
 ## 阶段总结
 
@@ -58,17 +58,23 @@ RTC-pir2 体现了 teacher-forcing 到 diffusion-forcing 的过程
 
 ## version 0.1.3
 
-- [] 切换为flashVLA噪声调度，chunk内同样时间步缓解模式冲突
+- [*] 切换为flashVLA噪声调度，chunk内同样时间步缓解模式冲突，增加chunk后效果好很多，但是chunk同样有问题**1.如何使用即时Conditioned？2.diffusion forcing类方法如何将不同即时条件注入不同状态**
+
+## version 0.1.3 fix
+
+- [*] server warmup
 
 ## version 0.2.0
 
 增加触觉进入fm部分：
 
-- [] 确定使用什么触觉模态（Xsense提供了多种模态，Xhand只有三轴力模态，UniVTAC也有多种模态，我们只需要考虑三轴力、RGB、Marker、deformation map）没有必要考虑baseline用的什么模态，要注意我们方便编码
+- [] 初版使用UniVTAC的Marker方案
 
-- [] 触觉encoder
+- [] MLP触觉encoder
 
-- [] encoder结果和本体状态同样方式接入，在fm一侧刷新？还是额外跑一次前向编码出KVCache后提交给action计算
+- [] state回到prompt里面，触觉通过AdaLN注入
+
+**encoder和注入方式**是主要实验，encoder可以暂时用MLP，注入方式分别尝试**AdaLN、FiLM、CA、Token拼接**
 
 引入仿真作为实验环境：
 

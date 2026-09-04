@@ -164,6 +164,9 @@ def _serve_multi_process_role(args: Args, role: str, port: int) -> None:
     role_policy = MultiProcessPolicy(
         policy, role, vlm_host=args.vlm_host, vlm_port=args.vlm_port
     )
+    logging.info("Warming up %s server", role.upper())
+    role_policy.warmup()
+    logging.info("%s server warmup complete", role.upper())
     metadata = {**policy.metadata, "multi_process_role": role}
     server = websocket_policy_server.WebsocketPolicyServer(
         policy=role_policy,
