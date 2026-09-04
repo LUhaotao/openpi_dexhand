@@ -90,12 +90,13 @@ def _shift_streaming_window(
     timestep: at.Float[at.Array, "..."],
     fresh_noise: _model.Actions,
 ) -> _model.Actions:
-    """Advance a diffusion-forcing action window by one configured chunk."""
+    """Denoise the next chunk and roll the future action window."""
     chunk_size = fresh_noise.shape[1]
+    clean_actions = actions[:, :chunk_size] - timestep[:chunk_size][None, :, None] * velocity[:, :chunk_size]
     next_actions = actions[:, chunk_size:] + (
         timestep[:-chunk_size] - timestep[chunk_size:]
     )[None, :, None] * velocity[:, chunk_size:]
-    return jnp.concatenate([next_actions, fresh_noise], axis=1)
+    return jnp.concatenate([clean_actions, next_actions, fresh_noise], axis=1)
 
 
 class Pi0(_model.BaseModel):
@@ -438,8 +439,9 @@ class Pi0(_model.BaseModel):
         chunk_size = self.streaming_chunk_size
 
         def step(_, carry):
-            step_rng, actions = carry
+            step_rng, action_buffer = carry
             step_rng, noise_rng = jax.random.split(step_rng)
+            actions = action_buffer[:, chunk_size:]
             velocity = self._velocity_from_prefix(state, prefix_cache, actions, timestep[None, :])
             fresh_noise = jax.random.normal(
                 noise_rng,

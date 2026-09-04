@@ -73,15 +73,15 @@ def test_sample_chunk_wise_timestep_shares_time_within_chunks():
     assert jnp.all(chunk_timestep <= ends)
 
 
-def test_shift_streaming_window_denoises_shifted_tokens_and_refills_noise():
-    actions = jnp.asarray([[[0.0], [10.0], [20.0], [30.0]]])
-    velocity = jnp.asarray([[[0.0], [1.0], [2.0], [3.0]]])
-    timestep = jnp.asarray([0.0, 0.25, 0.75, 1.0])
+def test_shift_streaming_window_emits_clean_chunk_and_refills_future_window():
+    actions = jnp.asarray([[[10.0], [20.0], [30.0], [40.0]]])
+    velocity = jnp.asarray([[[1.0], [2.0], [3.0], [4.0]]])
+    timestep = jnp.asarray([0.25, 0.5, 0.75, 1.0])
     fresh_noise = jnp.asarray([[[99.0]]])
 
     result = _shift_streaming_window(actions, velocity, timestep, fresh_noise)
 
-    assert jnp.allclose(result, jnp.asarray([[[9.75], [19.0], [29.25], [99.0]]]))
+    assert jnp.allclose(result, jnp.asarray([[[9.75], [19.5], [29.25], [39.0], [99.0]]]))
 
 
 def test_streaming_chunk_size_must_fit_action_horizon():
@@ -107,14 +107,14 @@ def test_streaming_sampler_advances_the_window_by_completed_chunks():
 
         @staticmethod
         def streaming_timestep(dtype):
-            return jnp.asarray([0.0, 0.5, 1.0], dtype=dtype)
+            return jnp.asarray([1 / 3, 2 / 3, 1.0], dtype=dtype)
 
         @staticmethod
         def _velocity_from_prefix(state, prefix_cache, noisy_actions, timestep):
             del state, prefix_cache, timestep
             return jnp.zeros_like(noisy_actions)
 
-    window = jnp.asarray([[[1.0], [2.0], [3.0]]])
+    window = jnp.asarray([[[99.0], [1.0], [2.0], [3.0]]])
     result = Pi0.advance_streaming_actions_from_prefix(
         FakeStreamingModel(),
         jax.random.key(0),
@@ -125,7 +125,7 @@ def test_streaming_sampler_advances_the_window_by_completed_chunks():
     )
 
     assert result.shape == window.shape
-    assert jnp.allclose(result[:, 0], jnp.asarray([[3.0]]))
+    assert jnp.allclose(result[:, 0], jnp.asarray([[2.0]]))
 
 
 def test_pi05_streaming_training_accepts_tokenwise_timestep():

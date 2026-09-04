@@ -105,11 +105,13 @@ class MultiProcessPolicy:
         )
         self._block_until_ready(actions)
         if getattr(self.policy._model, "streaming", False):  # noqa: SLF001
+            chunk_size = int(self.policy._model.streaming_chunk_size)  # noqa: SLF001
+            action_buffer = jnp.concatenate([actions[:, :chunk_size], actions], axis=1)
             advanced = self._advance_streaming_actions_from_prefix_jit(
                 jax.random.key(1),
                 observation.state,
                 prefix_cache,
-                actions,
+                action_buffer,
                 jnp.asarray(1, dtype=jnp.int32),
             )
             self._block_until_ready(advanced)
@@ -402,8 +404,15 @@ class MultiProcessPolicy:
         )
         timestep = self.policy._model.streaming_timestep(actions.dtype)  # noqa: SLF001
         noise = jax.random.normal(noise_rng, actions.shape, dtype=actions.dtype)
+        chunk_size = int(self.policy._model.streaming_chunk_size)  # noqa: SLF001
+        future_timestep = timestep[:-chunk_size]
         # ponytail: seed from a full sample plus the training marginal; retain an ODE trajectory only if cold starts need it.
-        action_window = timestep[None, :, None] * noise + (1.0 - timestep[None, :, None]) * actions
+        future_window = (
+            future_timestep[None, :, None] * noise[:, :-chunk_size]
+            + (1.0 - future_timestep[None, :, None]) * actions[:, chunk_size:]
+        )
+        # The ready chunk stays outside the H-token future window passed to FM.
+        action_window = jnp.concatenate([actions[:, :chunk_size], future_window, noise[:, -chunk_size:]], axis=1)
         return _StreamingState(session_id, execution_id, action_window)
 
     def _infer_fm(self, request: dict[str, Any]) -> dict[str, Any]:

@@ -2111,7 +2111,7 @@ _CONFIGS = [
         name="pi05_franka_xhand_flower_streaming",
         # Keep action_dim=32 to stay checkpoint-compatible with pi05_base.
         # The 18-D franka+xhand state/action is padded before entering the model.
-        model=pi0_config.Pi0Config(pi05=True, discrete_state_input=False, streaming=True, streaming_chunk_size=5, ),
+        model=pi0_config.Pi0Config(pi05=True, discrete_state_input=False, streaming=True, streaming_chunk_size=10, action_horizon=100),
         data=LeRobotFrankaXHandDataConfig(
             repo_id="/public/node01/users/lvrui/datasets/lerobot/flower_xhand_franka",
             assets=AssetsConfig(asset_id="/public/node01/users/lvrui/datasets/lerobot/flower_xhand_franka"),
