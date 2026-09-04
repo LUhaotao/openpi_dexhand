@@ -58,6 +58,10 @@ RTC-pir2 体现了 teacher-forcing 到 diffusion-forcing 的过程
 
 ## version 0.1.3
 
+- [] 切换为flashVLA噪声调度，chunk内同样时间步缓解模式冲突
+
+## version 0.2.0
+
 增加触觉进入fm部分：
 
 - [] 确定使用什么触觉模态（Xsense提供了多种模态，Xhand只有三轴力模态，UniVTAC也有多种模态，我们只需要考虑三轴力、RGB、Marker、deformation map）没有必要考虑baseline用的什么模态，要注意我们方便编码

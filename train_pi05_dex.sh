@@ -18,15 +18,21 @@ export XLA_PYTHON_CLIENT_PREALLOCATE=false
 # uv run scripts/train.py pi05_franka_xhand_flower_streaming \
 #   --exp-name=pi05_streaming_franka_xhand_flower \
 #   --model.streaming \
-#   --model.streaming-chunk-size=1 \
+#   --model.action-horizon=50 \
+#   --model.streaming-chunk-size=5 \
 #   --model.streaming-constant-weight=0.2 \
 #   --model.streaming-chunk-wise-weight=0.8 \
+#   --model.streaming-token-wise-weight=0.0 \
 #   --overwrite
+
+# action-horizon最好是streaming-chunk-size*10，因为我们是10步去噪
 
 uv run --with debugpy python -m debugpy --listen 5678 --wait-for-client scripts/train.py pi05_franka_xhand_flower_streaming \
   --exp-name=pi05_streaming_franka_xhand_flower \
   --model.streaming \
-  --model.streaming-chunk-size=1 \
+  --model.action-horizon=50 \
+  --model.streaming-chunk-size=5 \
   --model.streaming-constant-weight=0.2 \
   --model.streaming-chunk-wise-weight=0.8 \
+  --model.streaming-token-wise-weight=0.0 \
   --overwrite

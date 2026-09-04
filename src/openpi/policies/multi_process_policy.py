@@ -258,8 +258,23 @@ class MultiProcessPolicy:
         session_id = request.get("session_id", "default")
         if not isinstance(session_id, str) or not session_id:
             raise ValueError("session_id must be a non-empty string")
+        clear_prefix_cache = request.get("clear_prefix_cache", False)
+        if not isinstance(clear_prefix_cache, bool):
+            raise ValueError("clear_prefix_cache must be a boolean")
         self._streaming_state = None
-        return {"protocol_version": 1, "session_id": session_id, "status": "reset"}
+        if clear_prefix_cache:
+            with self._cache_lock:
+                self._refresh_generation += 1
+                self._prefix_cache = None
+                self._pending_cache = None
+                self._cache_id = 0
+                self._cache_version = None
+        return {
+            "protocol_version": 1,
+            "session_id": session_id,
+            "status": "reset",
+            "prefix_cache_cleared": clear_prefix_cache,
+        }
 
     def _stream_infer(self, request: dict[str, Any]) -> dict[str, Any]:
         prefix_cache, cache_version, previous_version = self._snapshot_cache()

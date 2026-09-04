@@ -30,7 +30,7 @@
 
 2. https://github.com/pi-r2-flow/Isaac-GR00T.git，Pi-R2，实现了**diffusion forcing的滑动窗口**
 
-3. https://arxiv.org/pdf/2608.25798v1，TacForcing:，这一篇是最为接近我们想法的，diffusion forcing + 触觉，他的状态使用在了离散部分，保持pi05的原始信息，但是没有开源**我们要加速了**，这一篇在UniVTAC上面跑了，我们也跑这个，这篇论文给出了触觉注入方式**动作 token 作为 query，触觉 token 作为 key**，同时只允许当前即将执行token看触觉
+3. https://arxiv.org/pdf/2608.25798v1，TacForcing:，这一篇是最为接近我们想法的，diffusion forcing + 触觉，他的状态使用在了离散部分，保持pi05的原始信息，但是没有开源**我们要加速了**，这一篇在UniVTAC上面跑了，我们也跑这个，这篇论文给出了触觉注入方式**动作 token 作为 query，触觉 token 作为 key**，同时只允许当前即将执行token看触觉（EATA，这里做了消融，只给当前token会更好）
 
 4. https://github.com/zhuoqun-chen/rnrdp，RNR-DP，在训练时使用独立随机噪声，其提到**streaming噪声提高平滑性，随机噪声提高独立去噪能力**，使用额外的训练步训练独立去噪会有附加成本
 

@@ -92,6 +92,13 @@ def test_streaming_chunk_size_must_fit_action_horizon():
         _pi0_config.Pi0Config(action_horizon=5, streaming=True, streaming_chunk_size=2)
 
 
+def test_streaming_token_wise_weight_defaults_to_zero():
+    config = _pi0_config.Pi0Config(streaming=True)
+    assert config.streaming_constant_weight == 0.2
+    assert config.streaming_chunk_wise_weight == 0.8
+    assert config.streaming_token_wise_weight == 0.0
+
+
 def test_streaming_sampler_advances_the_window_by_completed_chunks():
     class FakeStreamingModel:
         streaming = True

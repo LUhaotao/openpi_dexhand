@@ -105,6 +105,9 @@ class Pi0(_model.BaseModel):
         self.discrete_state_input = config.discrete_state_input
         self.streaming = config.streaming
         self.streaming_chunk_size = config.streaming_chunk_size
+        self.streaming_constant_weight = config.streaming_constant_weight
+        self.streaming_chunk_wise_weight = config.streaming_chunk_wise_weight
+        self.streaming_token_wise_weight = config.streaming_token_wise_weight
         paligemma_config = _gemma.get_config(config.paligemma_variant)
         action_expert_config = _gemma.get_config(config.action_expert_variant)
         # TODO: rewrite gemma in NNX. For now, use bridge.
@@ -248,21 +251,48 @@ class Pi0(_model.BaseModel):
     def compute_loss(
         self, rng: at.KeyArrayLike, observation: _model.Observation, actions: _model.Actions, *, train: bool = False
     ) -> at.Float[at.Array, "*b ah"]:
-        preprocess_rng, noise_rng, time_rng = jax.random.split(rng, 3)
+        (
+            preprocess_rng,
+            noise_rng,
+            constant_time_rng,
+            chunk_time_rng,
+            token_time_rng,
+            regime_rng,
+        ) = jax.random.split(rng, 6)
         observation = _model.preprocess_observation(preprocess_rng, observation, train=train)
 
         batch_shape = actions.shape[:-2]
         noise = jax.random.normal(noise_rng, actions.shape)
         if self.streaming:
-            time = _sample_chunk_wise_timestep(
-                time_rng,
+            total_weight = (
+                self.streaming_constant_weight
+                + self.streaming_chunk_wise_weight
+                + self.streaming_token_wise_weight
+            )
+            regime = jax.random.uniform(regime_rng) * total_weight
+            constant_time = jax.random.beta(constant_time_rng, 1.5, 1.0, batch_shape) * 0.999 + 0.001
+            constant_time = jnp.broadcast_to(constant_time[..., None], (*batch_shape, self.action_horizon))
+            chunk_time = _sample_chunk_wise_timestep(
+                chunk_time_rng,
                 batch_shape,
                 self.action_horizon,
                 self.streaming_chunk_size,
                 dtype=actions.dtype,
             )
+            token_time = jax.random.beta(
+                token_time_rng, 1.5, 1.0, (*batch_shape, self.action_horizon)
+            ) * 0.999 + 0.001
+            time = jnp.where(
+                regime < self.streaming_constant_weight,
+                constant_time,
+                jnp.where(
+                    regime < self.streaming_constant_weight + self.streaming_chunk_wise_weight,
+                    chunk_time,
+                    token_time,
+                ),
+            ).astype(actions.dtype)
         else:
-            time = jax.random.beta(time_rng, 1.5, 1, batch_shape) * 0.999 + 0.001
+            time = jax.random.beta(constant_time_rng, 1.5, 1, batch_shape) * 0.999 + 0.001
         time_expanded = time[..., None] if self.streaming else time[..., None, None]
         x_t = time_expanded * noise + (1 - time_expanded) * actions
         u_t = noise - actions
