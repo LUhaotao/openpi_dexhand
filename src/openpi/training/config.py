@@ -255,9 +255,28 @@ class LeRobotUniVTACDataConfig(DataConfigFactory):
 
     @override
     def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
+        repack_transforms = self.repack_transforms
+        if getattr(model_config, "use_tactile", False):
+            repack_transforms = _transforms.Group(
+                inputs=[
+                    _transforms.RepackTransform(
+                        {
+                            "images": {
+                                "cam_side": "observation.images.head",
+                                "cam_wrist": "observation.images.wrist",
+                            },
+                            "state": "observation.state",
+                            "left_marker": "observation.tactile.left_marker",
+                            "right_marker": "observation.tactile.right_marker",
+                            "actions": "action",
+                            "prompt": "task",
+                        }
+                    )
+                ]
+            )
         return dataclasses.replace(
             self.create_base_config(assets_dirs, model_config),
-            repack_transforms=self.repack_transforms,
+            repack_transforms=repack_transforms,
             data_transforms=_transforms.Group(
                 inputs=[franka_xhand_policy.FrankaXHandInputs()],
                 outputs=[franka_xhand_policy.FrankaXHandOutputs(action_dim=self.action_dim)],
@@ -703,11 +722,16 @@ class TrainConfig:
 UNIVTAC_DATA_ROOT = "/public/node01/users/lvrui/datasets/lerobot/univtac"
 
 
-def make_univtac_streaming_config(dataset_name: str) -> TrainConfig:
+def make_univtac_streaming_config(dataset_name: str, *, use_tactile: bool = False) -> TrainConfig:
     dataset_dir = f"{UNIVTAC_DATA_ROOT}/{dataset_name}"
     return TrainConfig(
-        name=f"pi05_UniVTAC_{dataset_name}_streaming",
-        model=pi0_config.Pi0Config(pi05=True, discrete_state_input=False, streaming=True),
+        name=f"pi05_UniVTAC_{dataset_name}{'_tactile' if use_tactile else ''}_streaming",
+        model=pi0_config.Pi0Config(
+            pi05=True,
+            discrete_state_input=False,
+            streaming=True,
+            use_tactile=use_tactile,
+        ),
         data=LeRobotUniVTACDataConfig(
             repo_id=dataset_dir,
             assets=AssetsConfig(asset_id=dataset_dir),
@@ -2146,6 +2170,7 @@ _CONFIGS = [
     # UniVTAC datasets share the same 9-D Franka gripper pipeline.
     make_univtac_streaming_config("grasp_classify"),
     make_univtac_streaming_config("insert_HDMI"),
+    make_univtac_streaming_config("insert_HDMI", use_tactile=True),
     make_univtac_streaming_config("insert_hole"),
     make_univtac_streaming_config("insert_tube"),
     make_univtac_streaming_config("lift_bottle"),

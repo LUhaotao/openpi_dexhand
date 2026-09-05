@@ -8,6 +8,8 @@
 #   图片存储: bash convert_hdf5_to_lerobot/run_convert.sh --mode image
 #   选择触觉: bash convert_hdf5_to_lerobot/run_convert.sh --tactile rgb_marker --tactile depth
 #   全部触觉: bash convert_hdf5_to_lerobot/run_convert.sh --tactile all
+#   增量添加到标准格式: bash convert_hdf5_to_lerobot/run_convert.sh --augment --tactile marker --tactile depth
+#   --augment 会更新 Parquet、videos 和 meta，不改原始 HDF5
 
 .venv/bin/python convert_hdf5_to_lerobot/convert_univtac_to_lerobot.py \
   --source-dir /public/node01/users/lvrui/datasets/hdf5/univtac/put_bottle_in_shelf/clean \

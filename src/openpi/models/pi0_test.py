@@ -200,6 +200,39 @@ def test_pi05_continuous_state_uses_clean_timestep_condition():
     assert loss.shape == (1, config.action_horizon)
 
 
+def test_pi05_tactile_marker_modulates_adarms_condition():
+    key = jax.random.key(0)
+    config = _pi0_config.Pi0Config(
+        pi05=True,
+        use_tactile=True,
+        paligemma_variant="dummy",
+        action_expert_variant="dummy",
+        action_horizon=3,
+    )
+    model = config.create(key)
+    observation, _ = config.fake_obs(batch_size=1), config.fake_act(batch_size=1)
+    noisy_actions = jnp.zeros((1, config.action_horizon, config.action_dim), dtype=jnp.float32)
+    timestep = jnp.ones((1,), dtype=jnp.float32)
+
+    _, _, _, adarms_cond = model.embed_suffix(observation, noisy_actions, timestep)
+
+    time_embedding = posemb_sincos(
+        timestep,
+        model.action_in_proj.out_features,
+        min_period=4e-3,
+        max_period=4.0,
+    )
+    time_condition = model.time_mlp_out(jax.nn.silu(model.time_mlp_in(time_embedding)))
+    time_condition = jax.nn.silu(time_condition)
+    tactile_condition = model._marker_condition(observation)
+
+    assert observation.tactile_left_marker is not None
+    assert observation.tactile_right_marker is not None
+    assert tactile_condition is not None
+    assert adarms_cond.shape == (1, 64)
+    assert jnp.allclose(adarms_cond, time_condition + tactile_condition)
+
+
 def test_checkpoint_loader_keeps_new_state_projection_initialized(tmp_path, monkeypatch):
     from openpi.models import model as _model
     from openpi.training import weight_loaders

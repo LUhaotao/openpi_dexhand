@@ -43,6 +43,14 @@ class FrankaXHandInputs(transforms.DataTransformFn):
             "state": np.asarray(data["state"], dtype=np.float32),
         }
 
+        has_left_marker = "left_marker" in data
+        has_right_marker = "right_marker" in data
+        if has_left_marker != has_right_marker:
+            raise ValueError("left_marker and right_marker must be provided together")
+        if has_left_marker:
+            inputs["tactile_left_marker"] = _to_marker(data["left_marker"], "left_marker")
+            inputs["tactile_right_marker"] = _to_marker(data["right_marker"], "right_marker")
+
         if "actions" in data:
             inputs["actions"] = np.asarray(data["actions"], dtype=np.float32)
         if "prompt" in data:
@@ -74,3 +82,10 @@ def _to_hwc_uint8(img: np.ndarray) -> np.ndarray:
     if img.shape[-1] == 3:
         return img
     raise ValueError(f"Expected CHW or HWC RGB image, got shape {img.shape}")
+
+
+def _to_marker(marker: np.ndarray, name: str) -> np.ndarray:
+    marker = np.asarray(marker, dtype=np.float32)
+    if marker.shape != (2, 1200, 2):
+        raise ValueError(f"Expected {name} to have shape (2, 1200, 2), got {marker.shape}")
+    return marker

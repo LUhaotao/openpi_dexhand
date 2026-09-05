@@ -8,7 +8,7 @@
 
 ### 触觉信息注入方式
 
-1. 
+1. https://github.com/stanford-iprl-lab/fact，触觉使用AdaLN注入，门控、logit-normal噪声调度，历史信号，门控
 
 ### benchmark
 

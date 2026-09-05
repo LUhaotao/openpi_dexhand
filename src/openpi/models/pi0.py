@@ -109,6 +109,7 @@ class Pi0(_model.BaseModel):
         self.streaming_constant_weight = config.streaming_constant_weight
         self.streaming_chunk_wise_weight = config.streaming_chunk_wise_weight
         self.streaming_token_wise_weight = config.streaming_token_wise_weight
+        self.use_tactile = config.use_tactile
         paligemma_config = _gemma.get_config(config.paligemma_variant)
         action_expert_config = _gemma.get_config(config.action_expert_variant)
         # TODO: rewrite gemma in NNX. For now, use bridge.
@@ -139,6 +140,10 @@ class Pi0(_model.BaseModel):
                 self.state_proj = nnx.Linear(config.action_dim, action_expert_config.width, rngs=rngs)
             self.time_mlp_in = nnx.Linear(action_expert_config.width, action_expert_config.width, rngs=rngs)
             self.time_mlp_out = nnx.Linear(action_expert_config.width, action_expert_config.width, rngs=rngs)
+            if self.use_tactile:
+                self.marker_mlp_in = nnx.Linear(4800, 512, rngs=rngs)
+                self.marker_mlp_out = nnx.Linear(512, action_expert_config.width, rngs=rngs)
+                self.marker_fusion = nnx.Linear(2 * action_expert_config.width, action_expert_config.width, rngs=rngs)
         else:
             self.state_proj = nnx.Linear(config.action_dim, action_expert_config.width, rngs=rngs)
             self.action_time_mlp_in = nnx.Linear(2 * action_expert_config.width, action_expert_config.width, rngs=rngs)
@@ -182,9 +187,30 @@ class Pi0(_model.BaseModel):
         ar_mask = jnp.array(ar_mask)
         return tokens, input_mask, ar_mask
 
+    def _marker_condition(self, obs: _model.Observation) -> at.Float[at.Array, "b emb"] | None:
+        if not self.use_tactile:
+            return None
+        if obs.tactile_left_marker is None or obs.tactile_right_marker is None:
+            raise ValueError("use_tactile=True requires both tactile marker fields")
+
+        def encode(marker: at.Float[at.Array, "b 2 1200 2"]) -> at.Float[at.Array, "b emb"]:
+            marker = marker / jnp.asarray((320.0, 240.0), dtype=marker.dtype)
+            marker = marker.reshape(marker.shape[0], -1)
+            marker = self.marker_mlp_in(marker)
+            marker = jax.nn.gelu(marker)
+            return self.marker_mlp_out(marker)
+
+        left_embedding = encode(obs.tactile_left_marker)
+        right_embedding = encode(obs.tactile_right_marker)
+        return self.marker_fusion(jnp.concatenate([left_embedding, right_embedding], axis=-1))
+
     @at.typecheck
     def embed_suffix(
-        self, obs: _model.Observation, noisy_actions: _model.Actions, timestep: at.Float[at.Array, "b ..."]
+        self,
+        obs: _model.Observation,
+        noisy_actions: _model.Actions,
+        timestep: at.Float[at.Array, "b ..."],
+        tactile_condition: at.Float[at.Array, "b emb"] | None = None,
     ) -> tuple[
         at.Float[at.Array, "b s emb"],
         at.Bool[at.Array, "b s"],
@@ -207,11 +233,17 @@ class Pi0(_model.BaseModel):
         # embed timestep using sine-cosine positional encoding with sensitivity in the range [0, 1]
         time_emb = posemb_sincos(timestep, self.action_in_proj.out_features, min_period=4e-3, max_period=4.0)
         if self.pi05:
+            if tactile_condition is None:
+                tactile_condition = self._marker_condition(obs)
             # time MLP (for adaRMS)
             time_emb = self.time_mlp_in(time_emb)
             time_emb = nnx.swish(time_emb)
             time_emb = self.time_mlp_out(time_emb)
             time_emb = nnx.swish(time_emb)
+            if tactile_condition is not None:
+                time_emb = time_emb + (
+                    tactile_condition[:, None, :] if time_emb.ndim == 3 else tactile_condition
+                )
             action_expert_tokens = action_tokens
             if not self.discrete_state_input and timestep.ndim > 1:
                 # The state token is a static condition, so use the clean flow
@@ -227,6 +259,8 @@ class Pi0(_model.BaseModel):
                 clean_time_emb = nnx.swish(clean_time_emb)
                 clean_time_emb = self.time_mlp_out(clean_time_emb)
                 clean_time_emb = nnx.swish(clean_time_emb)
+                if tactile_condition is not None:
+                    clean_time_emb = clean_time_emb + tactile_condition
                 adarms_cond = jnp.concatenate([clean_time_emb[:, None, :], time_emb], axis=1)
             else:
                 adarms_cond = time_emb
@@ -330,6 +364,7 @@ class Pi0(_model.BaseModel):
             noise = jax.random.normal(rng, (batch_size, self.action_horizon, self.action_dim))
 
         # first fill KV cache with a forward pass of the prefix
+        tactile_condition = self._marker_condition(observation)
         prefix_tokens, prefix_mask, prefix_ar_mask = self.embed_prefix(observation)
         prefix_attn_mask = make_attn_mask(prefix_mask, prefix_ar_mask)
         positions = jnp.cumsum(prefix_mask, axis=1) - 1
@@ -338,7 +373,7 @@ class Pi0(_model.BaseModel):
         def step(carry):
             x_t, time = carry
             suffix_tokens, suffix_mask, suffix_ar_mask, adarms_cond = self.embed_suffix(
-                observation, x_t, jnp.broadcast_to(time, batch_size)
+                observation, x_t, jnp.broadcast_to(time, batch_size), tactile_condition
             )
             # `suffix_attn_mask` is shape (b, suffix_len, suffix_len) indicating how the suffix tokens can attend to each
             # other
@@ -384,7 +419,10 @@ class Pi0(_model.BaseModel):
         prefix_attn_mask = make_attn_mask(prefix_mask, prefix_ar_mask)
         positions = jnp.cumsum(prefix_mask, axis=1) - 1
         _, kv_cache = self.PaliGemma.llm([prefix_tokens, None], mask=prefix_attn_mask, positions=positions)
-        return {"kv_cache": kv_cache, "prefix_pad_mask": prefix_mask}
+        prefix_cache = {"kv_cache": kv_cache, "prefix_pad_mask": prefix_mask}
+        if self.use_tactile:
+            prefix_cache["tactile_condition"] = self._marker_condition(observation)
+        return prefix_cache
 
     @at.typecheck
     def sample_actions_from_prefix(
@@ -410,6 +448,7 @@ class Pi0(_model.BaseModel):
                 prefix_cache,
                 x_t,
                 jnp.broadcast_to(time, batch_size),
+                prefix_cache.get("tactile_condition"),
             )
             return x_t + dt * v_t, time + dt
 
@@ -442,7 +481,9 @@ class Pi0(_model.BaseModel):
             step_rng, action_buffer = carry
             step_rng, noise_rng = jax.random.split(step_rng)
             actions = action_buffer[:, chunk_size:]
-            velocity = self._velocity_from_prefix(state, prefix_cache, actions, timestep[None, :])
+            velocity = self._velocity_from_prefix(
+                state, prefix_cache, actions, timestep[None, :], prefix_cache.get("tactile_condition")
+            )
             fresh_noise = jax.random.normal(
                 noise_rng,
                 (actions.shape[0], chunk_size, self.action_dim),
@@ -459,6 +500,7 @@ class Pi0(_model.BaseModel):
         prefix_cache: dict,
         noisy_actions: _model.Actions,
         timestep: at.Float[at.Array, "b ..."],
+        tactile_condition: at.Float[at.Array, "b emb"] | None = None,
     ) -> _model.Actions:
         """Predict flow velocity for suffix tokens against an encoded prefix."""
         kv_cache = jax.tree.map(
@@ -467,7 +509,7 @@ class Pi0(_model.BaseModel):
         prefix_pad_masks = jnp.asarray(prefix_cache["prefix_pad_mask"], dtype=jnp.bool_)
         suffix_observation = _model.Observation(images={}, image_masks={}, state=state)
         suffix_tokens, suffix_mask, suffix_ar_mask, adarms_cond = self.embed_suffix(
-            suffix_observation, noisy_actions, timestep
+            suffix_observation, noisy_actions, timestep, tactile_condition
         )
         suffix_attn_mask = make_attn_mask(suffix_mask, suffix_ar_mask)
         prefix_attn_mask = einops.repeat(prefix_pad_masks, "b p -> b s p", s=suffix_tokens.shape[1])

@@ -34,7 +34,7 @@
 
 - [*] 允许streaming与滑动窗口
 
-- [] 部分导入与异步推理，需要配合云端推理使用，**部分导入不是必须而是优化选项**，使用UniVTAC配合测试云端推理
+- [] 部分导入与异步推理，需要配合云端推理使用，**部分导入不是必须而是优化选项**，使用UniVTAC配合测试云端推理，**延迟测试是考虑fake client而不是fake server**
 
 ## version 0.1.2 fix
 
@@ -60,6 +60,8 @@ RTC-pir2 体现了 teacher-forcing 到 diffusion-forcing 的过程
 
 - [*] 切换为flashVLA噪声调度，chunk内同样时间步缓解模式冲突，增加chunk后效果好很多，但是chunk同样有问题**1.如何使用即时Conditioned？2.diffusion forcing类方法如何将不同即时条件注入不同状态**
 
+**实验结果**：1.action horizon最好保持在50，这样的话chunk size最好保持在5，实测horizon 100的时候效果很差；2.state最好放在prompt一侧，只把触觉condition作用给action这边，实测state放在prompt一侧过拟合会少很多；3.采用流式生成的方式，**惯性会很强**
+
 ## version 0.1.3 fix
 
 - [*] server warmup
@@ -68,14 +70,24 @@ RTC-pir2 体现了 teacher-forcing 到 diffusion-forcing 的过程
 
 增加触觉进入fm部分：
 
-- [] 初版使用UniVTAC的Marker方案
+- [*] 初版使用UniVTAC的Marker方案
 
-- [] MLP触觉encoder
+- [*] MLP触觉encoder
 
-- [] state回到prompt里面，触觉通过AdaLN注入
+- [*] state回到prompt里面，触觉通过AdaLN注入
 
 **encoder和注入方式**是主要实验，encoder可以暂时用MLP，注入方式分别尝试**AdaLN、FiLM、CA、Token拼接**
 
 引入仿真作为实验环境：
 
 - [*] 搭建UniVTAC仿真环境并测试推理时通路、延迟
+
+## version 0.2.1
+
+触觉数据的组成方式需要设计：
+
+- [] Marker，归一化json文件计算设计
+
+- [] 测试FiLM注入及CA注入（其实CA不是需要大量数据，而是对于encoder要求比较高，encoder数据要求大，可以考虑使用一些成型的encoder，但我们这个任务是要做快速的delta，所以还是考虑FiLM，AdaLN，guidence等方案）
+
+openpi这个代码的Config记录很有问题，每一个Train-Infer必须成对，这里需要考虑一下怎么弄

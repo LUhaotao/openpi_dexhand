@@ -35,6 +35,7 @@ class Pi0Config(_model.BaseModelConfig):
     streaming_constant_weight: float = 0.2
     streaming_chunk_wise_weight: float = 0.8
     streaming_token_wise_weight: float = 0.0
+    use_tactile: bool = False
     # This config option is not used directly by the model, but it is read by the ModelTransformFactory.
     discrete_state_input: bool = None  # type: ignore
 
@@ -51,6 +52,8 @@ class Pi0Config(_model.BaseModelConfig):
             raise ValueError("streaming_chunk_size must not exceed action_horizon")
         if self.streaming and self.action_horizon % self.streaming_chunk_size:
             raise ValueError("action_horizon must be divisible by streaming_chunk_size")
+        if self.use_tactile and not self.pi05:
+            raise ValueError("use_tactile requires pi05=True")
         if any(
             weight < 0
             for weight in (
@@ -92,6 +95,7 @@ class Pi0Config(_model.BaseModelConfig):
     def inputs_spec(self, *, batch_size: int = 1) -> tuple[_model.Observation, _model.Actions]:
         image_spec = jax.ShapeDtypeStruct([batch_size, *_model.IMAGE_RESOLUTION, 3], jnp.float32)
         image_mask_spec = jax.ShapeDtypeStruct([batch_size], jnp.bool_)
+        marker_spec = jax.ShapeDtypeStruct([batch_size, 2, 1200, 2], jnp.float32)
 
         with at.disable_typechecking():
             observation_spec = _model.Observation(
@@ -106,6 +110,8 @@ class Pi0Config(_model.BaseModelConfig):
                     "right_wrist_0_rgb": image_mask_spec,
                 },
                 state=jax.ShapeDtypeStruct([batch_size, self.action_dim], jnp.float32),
+                tactile_left_marker=marker_spec if self.use_tactile else None,
+                tactile_right_marker=marker_spec if self.use_tactile else None,
                 tokenized_prompt=jax.ShapeDtypeStruct([batch_size, self.max_token_len], jnp.int32),
                 tokenized_prompt_mask=jax.ShapeDtypeStruct([batch_size, self.max_token_len], bool),
             )
