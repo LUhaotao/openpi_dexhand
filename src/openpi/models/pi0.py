@@ -44,6 +44,13 @@ def make_attn_mask(input_mask, mask_ar):
     return jnp.logical_and(attn_mask, valid_mask)
 
 
+def _action_ar_mask(action_horizon: int, chunk_size: int, mode: str = "causal") -> list[bool]:
+    """Make action-block boundaries for the selected inter-chunk attention mode."""
+    if mode in ("mask", "bidirectional"):
+        return [index == 0 for index in range(action_horizon)]
+    return [index % chunk_size == 0 for index in range(action_horizon)]
+
+
 @at.typecheck
 def posemb_sincos(
     pos: at.Real[at.Array, "*b"], embedding_dim: int, min_period: float, max_period: float
@@ -106,6 +113,7 @@ class Pi0(_model.BaseModel):
         self.discrete_state_input = config.discrete_state_input
         self.streaming = config.streaming
         self.streaming_chunk_size = config.streaming_chunk_size
+        self.streaming_attention_mode = config.streaming_attention_mode
         self.streaming_constant_weight = config.streaming_constant_weight
         self.streaming_chunk_wise_weight = config.streaming_chunk_wise_weight
         self.streaming_token_wise_weight = config.streaming_token_wise_weight
@@ -275,8 +283,9 @@ class Pi0(_model.BaseModel):
             adarms_cond = None
         tokens.append(action_expert_tokens)
         input_mask.append(jnp.ones(action_expert_tokens.shape[:2], dtype=jnp.bool_))
-        # image/language/state inputs do not attend to action tokens
-        ar_mask += [True] + ([False] * (action_horizon - 1))
+        # Streaming action chunks are bidirectional internally; inter-chunk mode is configurable.
+        chunk_size = self.streaming_chunk_size if self.streaming else action_horizon
+        ar_mask += _action_ar_mask(action_horizon, chunk_size, self.streaming_attention_mode)
         tokens = jnp.concatenate(tokens, axis=1)
         input_mask = jnp.concatenate(input_mask, axis=1)
         ar_mask = jnp.array(ar_mask)
@@ -338,6 +347,9 @@ class Pi0(_model.BaseModel):
         input_mask = jnp.concatenate([prefix_mask, suffix_mask], axis=1)
         ar_mask = jnp.concatenate([prefix_ar_mask, suffix_ar_mask], axis=0)
         attn_mask = make_attn_mask(input_mask, ar_mask)
+        attn_mask = self._mask_action_chunks(
+            attn_mask, prefix_tokens.shape[1] + suffix_tokens.shape[1] - self.action_horizon
+        )
         positions = jnp.cumsum(input_mask, axis=1) - 1
         (prefix_out, suffix_out), _ = self.PaliGemma.llm(
             [prefix_tokens, suffix_tokens], mask=attn_mask, positions=positions, adarms_cond=[None, adarms_cond]
@@ -345,6 +357,17 @@ class Pi0(_model.BaseModel):
         v_t = self.action_out_proj(suffix_out[:, -self.action_horizon :])
 
         return jnp.mean(jnp.square(v_t - u_t), axis=-1)
+
+    def _mask_action_chunks(self, attn_mask, action_start: int):
+        if self.streaming_attention_mode != "mask":
+            return attn_mask
+        chunk_size = self.streaming_chunk_size if self.streaming else self.action_horizon
+        chunk_ids = jnp.arange(self.action_horizon) // chunk_size
+        same_chunk = chunk_ids[:, None] == chunk_ids[None, :]
+        action_end = action_start + self.action_horizon
+        return attn_mask.at[:, action_start:action_end, action_start:action_end].set(
+            attn_mask[:, action_start:action_end, action_start:action_end] & same_chunk[None]
+        )
 
     @override
     def sample_actions(
@@ -378,6 +401,9 @@ class Pi0(_model.BaseModel):
             # `suffix_attn_mask` is shape (b, suffix_len, suffix_len) indicating how the suffix tokens can attend to each
             # other
             suffix_attn_mask = make_attn_mask(suffix_mask, suffix_ar_mask)
+            suffix_attn_mask = self._mask_action_chunks(
+                suffix_attn_mask, suffix_tokens.shape[1] - self.action_horizon
+            )
             # `prefix_attn_mask` is shape (b, suffix_len, prefix_len) indicating how the suffix tokens can attend to the
             # prefix tokens
             prefix_attn_mask = einops.repeat(prefix_mask, "b p -> b s p", s=suffix_tokens.shape[1])
@@ -419,10 +445,7 @@ class Pi0(_model.BaseModel):
         prefix_attn_mask = make_attn_mask(prefix_mask, prefix_ar_mask)
         positions = jnp.cumsum(prefix_mask, axis=1) - 1
         _, kv_cache = self.PaliGemma.llm([prefix_tokens, None], mask=prefix_attn_mask, positions=positions)
-        prefix_cache = {"kv_cache": kv_cache, "prefix_pad_mask": prefix_mask}
-        if self.use_tactile:
-            prefix_cache["tactile_condition"] = self._marker_condition(observation)
-        return prefix_cache
+        return {"kv_cache": kv_cache, "prefix_pad_mask": prefix_mask}
 
     @at.typecheck
     def sample_actions_from_prefix(
@@ -433,8 +456,11 @@ class Pi0(_model.BaseModel):
         *,
         num_steps: int | at.Int[at.Array, ""] = 10,
         noise: at.Float[at.Array, "b ah ad"] | None = None,
+        tactile_condition: at.Float[at.Array, "b emb"] | None = None,
     ) -> _model.Actions:
         """Run flow matching using a prefix KV cache produced by ``encode_prefix``."""
+        if getattr(self, "use_tactile", False) and tactile_condition is None:
+            raise ValueError("use_tactile=True requires tactile_condition for prefix sampling")
         batch_size = state.shape[0]
         if noise is None:
             noise = jax.random.normal(rng, (batch_size, self.action_horizon, self.action_dim))
@@ -448,7 +474,7 @@ class Pi0(_model.BaseModel):
                 prefix_cache,
                 x_t,
                 jnp.broadcast_to(time, batch_size),
-                prefix_cache.get("tactile_condition"),
+                tactile_condition,
             )
             return x_t + dt * v_t, time + dt
 
@@ -469,10 +495,13 @@ class Pi0(_model.BaseModel):
         prefix_cache: dict,
         action_window: _model.Actions,
         advance: at.Int[at.Array, ""],
+        tactile_condition: at.Float[at.Array, "b emb"] | None = None,
     ) -> _model.Actions:
         """Advance a token-wise diffusion-forcing window by completed action chunks."""
         if not self.streaming:
             raise ValueError("Streaming inference requires a model trained with streaming=True")
+        if getattr(self, "use_tactile", False) and tactile_condition is None:
+            raise ValueError("use_tactile=True requires tactile_condition for streaming")
 
         timestep = self.streaming_timestep(action_window.dtype)
         chunk_size = self.streaming_chunk_size
@@ -481,9 +510,12 @@ class Pi0(_model.BaseModel):
             step_rng, action_buffer = carry
             step_rng, noise_rng = jax.random.split(step_rng)
             actions = action_buffer[:, chunk_size:]
-            velocity = self._velocity_from_prefix(
-                state, prefix_cache, actions, timestep[None, :], prefix_cache.get("tactile_condition")
-            )
+            if tactile_condition is None:
+                velocity = self._velocity_from_prefix(state, prefix_cache, actions, timestep[None, :])
+            else:
+                velocity = self._velocity_from_prefix(
+                    state, prefix_cache, actions, timestep[None, :], tactile_condition
+                )
             fresh_noise = jax.random.normal(
                 noise_rng,
                 (actions.shape[0], chunk_size, self.action_dim),
@@ -512,6 +544,7 @@ class Pi0(_model.BaseModel):
             suffix_observation, noisy_actions, timestep, tactile_condition
         )
         suffix_attn_mask = make_attn_mask(suffix_mask, suffix_ar_mask)
+        suffix_attn_mask = self._mask_action_chunks(suffix_attn_mask, suffix_tokens.shape[1] - self.action_horizon)
         prefix_attn_mask = einops.repeat(prefix_pad_masks, "b p -> b s p", s=suffix_tokens.shape[1])
         full_attn_mask = jnp.concatenate([prefix_attn_mask, suffix_attn_mask], axis=-1)
         positions = jnp.sum(prefix_pad_masks, axis=-1)[:, None] + jnp.cumsum(suffix_mask, axis=-1) - 1

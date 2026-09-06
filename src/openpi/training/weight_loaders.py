@@ -48,7 +48,7 @@ class CheckpointWeightLoader(WeightLoader):
     params_path: str
     # Keep newly introduced projection parameters at their model initialization
     # when loading older checkpoints that do not contain them.
-    missing_regex: str = r".*lora.*|.*state_proj.*"
+    missing_regex: str = r".*lora.*|.*state_proj.*|.*marker_.*"
 
     def load(self, params: at.Params) -> at.Params:
         # We are loading np.ndarray and relying on the training code to properly convert and shard the params.

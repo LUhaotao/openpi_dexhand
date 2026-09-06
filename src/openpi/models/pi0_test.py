@@ -5,9 +5,11 @@ import numpy as np
 import pytest
 
 from openpi.models.pi0 import Pi0
+from openpi.models.pi0 import _action_ar_mask
 from openpi.models.pi0 import _chunk_wise_timestep
 from openpi.models.pi0 import _sample_chunk_wise_timestep
 from openpi.models.pi0 import _shift_streaming_window
+from openpi.models.pi0 import make_attn_mask
 from openpi.models.pi0 import posemb_sincos
 import openpi.models.pi0_config as _pi0_config
 
@@ -97,6 +99,59 @@ def test_streaming_token_wise_weight_defaults_to_zero():
     assert config.streaming_constant_weight == 0.2
     assert config.streaming_chunk_wise_weight == 0.8
     assert config.streaming_token_wise_weight == 0.0
+
+
+def test_action_attention_is_bidirectional_within_causal_streaming_chunks():
+    ar_mask = _action_ar_mask(action_horizon=6, chunk_size=2)
+    assert ar_mask == [True, False, True, False, True, False]
+    assert jnp.array_equal(
+        make_attn_mask(jnp.ones((1, 6), dtype=jnp.bool_), jnp.asarray(ar_mask)),
+        jnp.asarray(
+            [[
+                [True, True, False, False, False, False],
+                [True, True, False, False, False, False],
+                [True, True, True, True, False, False],
+                [True, True, True, True, False, False],
+                [True, True, True, True, True, True],
+                [True, True, True, True, True, True],
+            ]]
+        ),
+    )
+    assert _action_ar_mask(action_horizon=6, chunk_size=6) == [True, False, False, False, False, False]
+    assert _action_ar_mask(action_horizon=6, chunk_size=2, mode="bidirectional") == [True, False, False, False, False, False]
+    assert _action_ar_mask(action_horizon=6, chunk_size=2, mode="mask") == [True, False, False, False, False, False]
+
+
+def test_streaming_attention_mode_controls_chunk_connections():
+    base = jnp.ones((1, 6, 6), dtype=jnp.bool_)
+    config = _pi0_config.Pi0Config(
+        streaming=True,
+        streaming_chunk_size=2,
+        streaming_attention_mode="mask",
+        action_horizon=6,
+        paligemma_variant="dummy",
+        action_expert_variant="dummy",
+    )
+    model = config.create(jax.random.key(0))
+    masked = model._mask_action_chunks(base, 0)  # noqa: SLF001
+    expected = jnp.asarray(np.kron(np.eye(3, dtype=bool), np.ones((2, 2), dtype=bool)))
+    assert jnp.array_equal(masked[0], expected)
+
+    config = _pi0_config.Pi0Config(
+        streaming=True,
+        streaming_chunk_size=2,
+        streaming_attention_mode="bidirectional",
+        action_horizon=6,
+        paligemma_variant="dummy",
+        action_expert_variant="dummy",
+    )
+    model = config.create(jax.random.key(1))
+    assert jnp.all(model._mask_action_chunks(base, 0))  # noqa: SLF001
+
+
+def test_streaming_attention_mode_is_validated():
+    with pytest.raises(ValueError, match="streaming_attention_mode"):
+        _pi0_config.Pi0Config(streaming_attention_mode="invalid")
 
 
 def test_streaming_sampler_advances_the_window_by_completed_chunks():
@@ -245,9 +300,11 @@ def test_checkpoint_loader_keeps_new_state_projection_initialized(tmp_path, monk
     params = {
         "action_in_proj": {"kernel": np.zeros((32, 1024), dtype=np.float32)},
         "state_proj": {"kernel": np.full((32, 1024), 7.0, dtype=np.float32)},
+        "marker_mlp_in": {"kernel": np.full((4800, 512), 8.0, dtype=np.float32)},
     }
 
     result = loader.load(params)
 
     assert np.all(result["action_in_proj"]["kernel"] == 1.0)
     assert np.all(result["state_proj"]["kernel"] == 7.0)
+    assert np.all(result["marker_mlp_in"]["kernel"] == 8.0)

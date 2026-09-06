@@ -82,7 +82,7 @@ RTC-pir2 体现了 teacher-forcing 到 diffusion-forcing 的过程
 
 - [*] 搭建UniVTAC仿真环境并测试推理时通路、延迟
 
-## version 0.2.1
+## version 0.2.0 trick
 
 触觉数据的组成方式需要设计：
 
@@ -90,4 +90,21 @@ RTC-pir2 体现了 teacher-forcing 到 diffusion-forcing 的过程
 
 - [] 测试FiLM注入及CA注入（其实CA不是需要大量数据，而是对于encoder要求比较高，encoder数据要求大，可以考虑使用一些成型的encoder，但我们这个任务是要做快速的delta，所以还是考虑FiLM，AdaLN，guidence等方案）
 
+- [] 针对单个chunk使用AdaLN而隔离触觉对后续chunk的影响
+
+- [] 初始化策略
+
 openpi这个代码的Config记录很有问题，每一个Train-Infer必须成对，这里需要考虑一下怎么弄
+
+## version 0.2.1
+
+脑子清醒一点，我们的问题是**如何注入触觉的高频信息，于是我们选择了streaming，streaming的问题是条件跟随不够，所以触觉的作用是如何提高streaming的条件跟随**，我们的方法和主要创新点就变成了**我们该使用什么触觉注入方式来提高streaming的条件跟随**，所以我们近期的工作是**频繁实验发现为什么streaming的条件跟随不够**，有一篇论文提及streaming条件跟随不够是因为他**预去噪**，但是旧条件在没有streaming的情况下前向，条件跟随没有问题，所以关键的点应该围绕在chunk之间的干扰问题——**重规划的时候我只根据condition来所以没有问题，但是如果我是streaming那么后续chunk的去噪会受到prefix影响，这里会造成影响**
+
+- [] 补充action chunk间attention（bidirectional、casual、mask）
+
+
+
+
+
+
+

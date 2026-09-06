@@ -1,5 +1,5 @@
 import dataclasses
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 import flax.nnx as nnx
 import jax
@@ -32,6 +32,7 @@ class Pi0Config(_model.BaseModelConfig):
     # Optional streaming-style training with a per-chunk noise schedule.
     streaming: bool = False
     streaming_chunk_size: int = 1
+    streaming_attention_mode: Literal["mask", "causal", "bidirectional"] = "mask"
     streaming_constant_weight: float = 0.2
     streaming_chunk_wise_weight: float = 0.8
     streaming_token_wise_weight: float = 0.0
@@ -52,6 +53,8 @@ class Pi0Config(_model.BaseModelConfig):
             raise ValueError("streaming_chunk_size must not exceed action_horizon")
         if self.streaming and self.action_horizon % self.streaming_chunk_size:
             raise ValueError("action_horizon must be divisible by streaming_chunk_size")
+        if self.streaming_attention_mode not in ("mask", "causal", "bidirectional"):
+            raise ValueError("streaming_attention_mode must be one of: mask, causal, bidirectional")
         if self.use_tactile and not self.pi05:
             raise ValueError("use_tactile requires pi05=True")
         if any(

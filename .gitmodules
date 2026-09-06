@@ -7,9 +7,6 @@
 [submodule "third_party/pi-r2-GR00T"]
 	path = third_party/pi-r2-GR00T
 	url = https://github.com/pi-r2-flow/Isaac-GR00T.git
-[submodule "third_party/openpi_tactile"]
-	path = third_party/openpi_tactile
-	url = https://github.com/Ynao3/openpi_tactile.git
 [submodule "third_party/pi06star"]
 	path = third_party/pi06star
 	url = https://github.com/zywang03/pi06star.git
@@ -26,3 +23,6 @@
 [submodule "third_party/flashvla"]
 	path = third_party/flashvla
 	url = https://github.com/z-lab/flashvla
+[submodule "third_party/fact"]
+	path = third_party/fact
+	url = https://github.com/stanford-iprl-lab/fact.git

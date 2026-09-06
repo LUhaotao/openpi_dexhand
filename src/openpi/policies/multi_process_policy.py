@@ -58,6 +58,11 @@ class MultiProcessPolicy:
         self._streaming_state: _StreamingState | None = None
         self._vlm_client = None
         self._encode_prefix_jit = nnx_utils.module_jit(self.policy._model.encode_prefix)  # noqa: SLF001
+        self._encode_tactile_jit = (
+            nnx_utils.module_jit(self.policy._model._marker_condition)  # noqa: SLF001
+            if getattr(self.policy._model, "use_tactile", False)
+            else None
+        )
         self._sample_actions_from_prefix_jit = nnx_utils.module_jit(
             self.policy._model.sample_actions_from_prefix  # noqa: SLF001
         )
@@ -85,6 +90,16 @@ class MultiProcessPolicy:
             },
             image_masks={key: jnp.ones((1,), dtype=jnp.bool_) for key in _model.IMAGE_KEYS},
             state=jnp.ones((1, self.policy._model.action_dim), dtype=jnp.float32),  # noqa: SLF001
+            tactile_left_marker=(
+                jnp.ones((1, 2, 1200, 2), dtype=jnp.float32)
+                if getattr(self.policy._model, "use_tactile", False)
+                else None
+            ),
+            tactile_right_marker=(
+                jnp.ones((1, 2, 1200, 2), dtype=jnp.float32)
+                if getattr(self.policy._model, "use_tactile", False)
+                else None
+            ),
             tokenized_prompt=jnp.ones((1, self.policy._model.max_token_len), dtype=jnp.int32),  # noqa: SLF001
             tokenized_prompt_mask=jnp.ones((1, self.policy._model.max_token_len), dtype=jnp.bool_),  # noqa: SLF001
         )
@@ -97,11 +112,13 @@ class MultiProcessPolicy:
         # image encoder a second time in the FM process.
         prefix_spec = jax.eval_shape(self.policy._model.encode_prefix, observation)  # noqa: SLF001
         prefix_cache = jax.tree.map(lambda value: jnp.ones(value.shape, value.dtype), prefix_spec)
+        tactile_condition = self._tactile_condition(observation)
         actions = self._sample_actions_from_prefix_jit(
             jax.random.key(0),
             observation.state,
             prefix_cache,
             num_steps=10,
+            tactile_condition=tactile_condition,
         )
         self._block_until_ready(actions)
         if getattr(self.policy._model, "streaming", False):  # noqa: SLF001
@@ -113,6 +130,7 @@ class MultiProcessPolicy:
                 prefix_cache,
                 action_buffer,
                 jnp.asarray(1, dtype=jnp.int32),
+                tactile_condition=tactile_condition,
             )
             self._block_until_ready(advanced)
 
@@ -122,6 +140,11 @@ class MultiProcessPolicy:
             lambda leaf: leaf.block_until_ready() if hasattr(leaf, "block_until_ready") else leaf,
             value,
         )
+
+    def _tactile_condition(self, observation: _model.Observation) -> Any:
+        if self._encode_tactile_jit is None:
+            return None
+        return self._encode_tactile_jit(observation)
 
     def _encode_prefix(self, observation: dict[str, Any]) -> dict[str, Any]:
         model_observation = self._prepare(observation)
@@ -342,12 +365,14 @@ class MultiProcessPolicy:
             raise ValueError("executed_action_id must be a non-negative integer")
 
         model_observation = self._prepare(request["observation"])
+        tactile_condition = self._tactile_condition(model_observation)
         if self._streaming_state is None:
             self._streaming_state = self._seed_streaming_state(
                 session_id,
                 execution_id,
                 model_observation.state,
                 prefix_cache,
+                tactile_condition=tactile_condition,
                 num_steps=int(request.get("num_steps", 10)),
             )
         elif self._streaming_state.session_id != session_id:
@@ -367,6 +392,7 @@ class MultiProcessPolicy:
                     prefix_cache,
                     self._streaming_state.action_window,
                     jnp.asarray(completed_actions // chunk_size, dtype=jnp.int32),
+                    tactile_condition=tactile_condition,
                 )
                 self._streaming_state.execution_id = execution_id
 
@@ -391,6 +417,7 @@ class MultiProcessPolicy:
         state: jax.Array,
         prefix_cache: dict[str, Any],
         *,
+        tactile_condition: Any = None,
         num_steps: int,
     ) -> _StreamingState:
         if num_steps <= 0:
@@ -401,6 +428,7 @@ class MultiProcessPolicy:
             state,
             prefix_cache,
             num_steps=num_steps,
+            tactile_condition=tactile_condition,
         )
         timestep = self.policy._model.streaming_timestep(actions.dtype)  # noqa: SLF001
         noise = jax.random.normal(noise_rng, actions.shape, dtype=actions.dtype)
@@ -423,6 +451,7 @@ class MultiProcessPolicy:
                 f"Cache version mismatch: expected {expected!r}, active {cache_version!r}"
             )
         model_observation = self._prepare(request["observation"])
+        tactile_condition = self._tactile_condition(model_observation)
         self._rng, sample_rng = jax.random.split(self._rng)
         noise_tokens = int(request.get("noise_tokens", self.policy._model.action_horizon))  # noqa: SLF001
         if noise_tokens <= 0 or noise_tokens > self.policy._model.action_horizon:  # noqa: SLF001
@@ -437,6 +466,7 @@ class MultiProcessPolicy:
             prefix_cache,
             num_steps=int(request.get("num_steps", 10)),
             noise=noise,
+            tactile_condition=tactile_condition,
         )
         result = self.policy._output_transform(  # noqa: SLF001
             {"state": np.asarray(model_observation.state[0]), "actions": np.asarray(actions[0])}
