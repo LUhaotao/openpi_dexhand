@@ -1,3 +1,4 @@
+import dataclasses
 import logging
 import os
 import pathlib
@@ -6,6 +7,7 @@ from typing import Any
 import jax.numpy as jnp
 
 import openpi.models.model as _model
+import openpi.models.pi0_config as _pi0_config
 import openpi.policies.policy as _policy
 import openpi.shared.download as download
 from openpi.training import checkpoints as _checkpoints
@@ -67,6 +69,9 @@ def create_trained_policy(
     """
     repack_transforms = repack_transforms or transforms.Group()
     checkpoint_dir = download.maybe_download(str(checkpoint_dir))
+    if model_config := _pi0_config.load_snapshot(pathlib.Path(checkpoint_dir) / "model_config"):
+        logging.info("Loading Pi0Config snapshot from checkpoint")
+        train_config = dataclasses.replace(train_config, model=model_config)
 
     # Check if this is a PyTorch model by looking for model.safetensors
     weight_path = os.path.join(checkpoint_dir, "model.safetensors")

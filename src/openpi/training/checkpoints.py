@@ -11,6 +11,8 @@ import jax
 import orbax.checkpoint as ocp
 import orbax.checkpoint.future as future
 
+from openpi.models import model as _model
+from openpi.models import pi0_config
 from openpi.shared import array_typing as at
 import openpi.shared.normalize as _normalize
 import openpi.training.data_loader as _data_loader
@@ -41,6 +43,7 @@ def initialize_checkpoint_dir(
         checkpoint_dir,
         item_handlers={
             "assets": CallbackHandler(),
+            "model_config": CallbackHandler(),
             "train_state": ocp.PyTreeCheckpointHandler(),
             "params": ocp.PyTreeCheckpointHandler(),
         },
@@ -67,6 +70,7 @@ def save_state(
     state: training_utils.TrainState,
     data_loader: _data_loader.DataLoader,
     step: int,
+    model_config: _model.BaseModelConfig | None = None,
 ):
     def save_assets(directory: epath.Path):
         # Save the normalization stats.
@@ -83,6 +87,8 @@ def save_state(
         "train_state": train_state,
         "params": {"params": params},
     }
+    if isinstance(model_config, pi0_config.Pi0Config):
+        items["model_config"] = lambda directory: pi0_config.save_snapshot(directory, model_config)
     checkpoint_manager.save(step, items)
 
 

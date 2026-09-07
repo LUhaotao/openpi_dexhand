@@ -101,6 +101,20 @@ def test_streaming_token_wise_weight_defaults_to_zero():
     assert config.streaming_token_wise_weight == 0.0
 
 
+def test_pi0_config_snapshot_round_trip(tmp_path):
+    config = _pi0_config.Pi0Config(
+        pi05=True,
+        use_tactile=True,
+        action_dim=9,
+        action_horizon=50,
+        streaming=True,
+        streaming_chunk_size=5,
+        streaming_attention_mode="mask",
+    )
+    _pi0_config.save_snapshot(tmp_path, config)
+    assert _pi0_config.load_snapshot(tmp_path) == config
+
+
 def test_action_attention_is_bidirectional_within_causal_streaming_chunks():
     ar_mask = _action_ar_mask(action_horizon=6, chunk_size=2)
     assert ar_mask == [True, False, True, False, True, False]

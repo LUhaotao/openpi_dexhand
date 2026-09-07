@@ -727,6 +727,7 @@ def make_univtac_streaming_config(dataset_name: str, *, use_tactile: bool = Fals
             discrete_state_input=True,
             streaming=True,
             use_tactile=use_tactile,
+            streaming_attention_mode="mask",
         ),
         data=LeRobotUniVTACDataConfig(
             repo_id=dataset_dir,

@@ -1,4 +1,6 @@
 import dataclasses
+import json
+import pathlib
 from typing import TYPE_CHECKING, Literal
 
 import flax.nnx as nnx
@@ -13,6 +15,9 @@ import openpi.shared.nnx_utils as nnx_utils
 
 if TYPE_CHECKING:
     from openpi.models.pi0 import Pi0
+
+
+SNAPSHOT_FILENAME = "pi0_config.json"
 
 
 @dataclasses.dataclass(frozen=True)
@@ -152,3 +157,19 @@ class Pi0Config(_model.BaseModelConfig):
         if not filters:
             return nnx.Nothing
         return nnx.All(*filters)
+
+
+def save_snapshot(directory: str | pathlib.Path, config: Pi0Config) -> pathlib.Path:
+    """Save the model configuration alongside a checkpoint."""
+    path = pathlib.Path(directory) / SNAPSHOT_FILENAME
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(dataclasses.asdict(config), indent=2, sort_keys=True) + "\n")
+    return path
+
+
+def load_snapshot(directory: str | pathlib.Path) -> Pi0Config | None:
+    """Load a model configuration snapshot, if present."""
+    path = pathlib.Path(directory) / SNAPSHOT_FILENAME
+    if not path.exists():
+        return None
+    return Pi0Config(**json.loads(path.read_text()))
