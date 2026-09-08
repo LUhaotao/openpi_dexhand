@@ -1,3 +1,5 @@
+import json
+
 import flax.nnx as nnx
 import jax
 import jax.numpy as jnp
@@ -99,6 +101,9 @@ def test_streaming_token_wise_weight_defaults_to_zero():
     assert config.streaming_constant_weight == 0.2
     assert config.streaming_chunk_wise_weight == 0.8
     assert config.streaming_token_wise_weight == 0.0
+    assert _pi0_config.Pi0Config().streaming is False
+    assert _pi0_config.Pi0Config().streaming_attention_mode == "bidirectional"
+    assert _pi0_config.Pi0Config().use_tactile is False
 
 
 def test_pi0_config_snapshot_round_trip(tmp_path):
@@ -113,6 +118,14 @@ def test_pi0_config_snapshot_round_trip(tmp_path):
     )
     _pi0_config.save_snapshot(tmp_path, config)
     assert _pi0_config.load_snapshot(tmp_path) == config
+    assert json.loads((tmp_path / _pi0_config.SNAPSHOT_FILENAME).read_text()) == {
+        "action_dim": 9,
+        "streaming": True,
+        "streaming_attention_mode": "mask",
+        "streaming_chunk_size": 5,
+        "use_tactile": True,
+        "pi05": True,
+    }
 
 
 def test_action_attention_is_bidirectional_within_causal_streaming_chunks():

@@ -36,8 +36,8 @@ class Pi0Config(_model.BaseModelConfig):
     pi05: bool = False
     # Optional streaming-style training with a per-chunk noise schedule.
     streaming: bool = False
-    streaming_chunk_size: int = 1
-    streaming_attention_mode: Literal["mask", "causal", "bidirectional"] = "mask"
+    streaming_chunk_size: int = 5
+    streaming_attention_mode: Literal["mask", "causal", "bidirectional"] = "bidirectional"
     streaming_constant_weight: float = 0.2
     streaming_chunk_wise_weight: float = 0.8
     streaming_token_wise_weight: float = 0.0
@@ -160,10 +160,18 @@ class Pi0Config(_model.BaseModelConfig):
 
 
 def save_snapshot(directory: str | pathlib.Path, config: Pi0Config) -> pathlib.Path:
-    """Save the model configuration alongside a checkpoint."""
+    """Save only model settings that differ from the original Pi0 defaults."""
     path = pathlib.Path(directory) / SNAPSHOT_FILENAME
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(dataclasses.asdict(config), indent=2, sort_keys=True) + "\n")
+    defaults = dataclasses.asdict(Pi0Config())
+    values = dataclasses.asdict(config)
+    snapshot = {name: value for name, value in values.items() if value != defaults[name]}
+    # These are derived from pi05 and do not need to be persisted when unchanged.
+    if config.max_token_len == (200 if config.pi05 else 48):
+        snapshot.pop("max_token_len", None)
+    if config.discrete_state_input == config.pi05:
+        snapshot.pop("discrete_state_input", None)
+    path.write_text(json.dumps(snapshot, indent=2, sort_keys=True) + "\n")
     return path
 
 

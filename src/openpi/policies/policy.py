@@ -64,6 +64,17 @@ class Policy(BasePolicy):
             self._sample_actions = nnx_utils.module_jit(model.sample_actions)
             self._rng = rng or jax.random.key(0)
 
+    def warmup(self) -> None:
+        """Compile the JAX sampler before serving requests."""
+        if self._is_pytorch_model:
+            return
+
+        actions = self._sample_actions(jax.random.key(0), self._model.fake_obs(), **self._sample_kwargs)
+        jax.tree.map(
+            lambda value: value.block_until_ready() if hasattr(value, "block_until_ready") else value,
+            actions,
+        )
+
     @override
     def infer(self, obs: dict, *, noise: np.ndarray | None = None) -> dict:  # type: ignore[misc]
         # Make a copy since transformations may modify the inputs in place.

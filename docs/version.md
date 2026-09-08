@@ -96,14 +96,29 @@ RTC-pir2 体现了 teacher-forcing 到 diffusion-forcing 的过程
 
 openpi这个代码的Config记录很有问题，每一个Train-Infer必须成对，这里需要考虑一下怎么弄
 
+发现openpi的config问题主要是Pi0Config这个文件里面有很多实验配置，我们将其抽离为Config快照，专门保留pi0config内容，在推理的时候读取config快照内容，以此实现不修改config的隔离
+
+- [*] 完成config隔离
+
+这一步做了，我们config.py里面的内容就变成了跟随数据集的config，因为模型配置等集中在config快照，数据集以及batch等训练时信息保留在了config.py
+
 ## version 0.2.1
 
 脑子清醒一点，我们的问题是**如何注入触觉的高频信息，于是我们选择了streaming，streaming的问题是条件跟随不够，所以触觉的作用是如何提高streaming的条件跟随**，我们的方法和主要创新点就变成了**我们该使用什么触觉注入方式来提高streaming的条件跟随**，所以我们近期的工作是**频繁实验发现为什么streaming的条件跟随不够**，有一篇论文提及streaming条件跟随不够是因为他**预去噪**，但是旧条件在没有streaming的情况下前向，条件跟随没有问题，所以关键的点应该围绕在chunk之间的干扰问题——**重规划的时候我只根据condition来所以没有问题，但是如果我是streaming那么后续chunk的去噪会受到prefix影响，这里会造成影响**
 
-- [] 补充action chunk间attention（bidirectional、casual、mask）
+- [*] 补充action chunk间attention（bidirectional、casual、mask）
 
+## version 0.2.1 fix
 
+- [] 单进程server warmup
 
+- [] server runtime
+
+- [] 检查为什么chunk调大后会卡一下（是因为horizon带来的延迟？）
+
+## version 0.2.2
+
+- [] 门控
 
 
 

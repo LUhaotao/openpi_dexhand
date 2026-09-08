@@ -140,6 +140,8 @@ def main(args: Args) -> None:
         return
 
     policy = create_policy(args)
+    logging.info("Warming up policy")
+    policy.warmup()
     policy_metadata = policy.metadata
 
     # Record the policy's behavior.

@@ -724,10 +724,8 @@ def make_univtac_streaming_config(dataset_name: str, *, use_tactile: bool = Fals
         name=f"pi05_UniVTAC_{dataset_name}{'_tactile' if use_tactile else ''}_streaming",
         model=pi0_config.Pi0Config(
             pi05=True,
-            discrete_state_input=True,
             streaming=True,
             use_tactile=use_tactile,
-            streaming_attention_mode="mask",
         ),
         data=LeRobotUniVTACDataConfig(
             repo_id=dataset_dir,
