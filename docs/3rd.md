@@ -10,6 +10,8 @@
 
 1. https://github.com/stanford-iprl-lab/fact，触觉使用AdaLN注入，门控、logit-normal噪声调度，历史信号，门控
 
+2. https://github.com/LogosRoboticsGroup/TacPAC，触觉预测+修正动作
+
 ### benchmark
 
 1. https://github.com/univtac/UniVTAC，UniVTAC

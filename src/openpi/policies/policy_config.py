@@ -101,6 +101,11 @@ def create_trained_policy(
         except ImportError:
             pytorch_device = "cpu"
 
+    # fake_obs belongs to the model config because it is built from inputs_spec().
+    # Keep the observation in model format so warmup exercises the same sampler
+    # input shape as the transformed inference path.
+    warmup_observation = None if is_pytorch else train_config.model.fake_obs()
+
     return _policy.Policy(
         model,
         transforms=[
@@ -117,6 +122,7 @@ def create_trained_policy(
             *repack_transforms.outputs,
         ],
         sample_kwargs=sample_kwargs,
+        warmup_observation=warmup_observation,
         metadata=train_config.policy_metadata,
         is_pytorch=is_pytorch,
         pytorch_device=pytorch_device if is_pytorch else None,

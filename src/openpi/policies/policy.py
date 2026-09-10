@@ -30,6 +30,7 @@ class Policy(BasePolicy):
         transforms: Sequence[_transforms.DataTransformFn] = (),
         output_transforms: Sequence[_transforms.DataTransformFn] = (),
         sample_kwargs: dict[str, Any] | None = None,
+        warmup_observation: _model.Observation | None = None,
         metadata: dict[str, Any] | None = None,
         pytorch_device: str = "cpu",
         is_pytorch: bool = False,
@@ -42,6 +43,7 @@ class Policy(BasePolicy):
             transforms: Input data transformations to apply before inference.
             output_transforms: Output data transformations to apply after inference.
             sample_kwargs: Additional keyword arguments to pass to model.sample_actions.
+            warmup_observation: A model-format observation used to compile the JAX sampler during warmup.
             metadata: Additional metadata to store with the policy.
             pytorch_device: Device to use for PyTorch models (e.g., "cpu", "cuda:0").
                           Only relevant when is_pytorch=True.
@@ -51,6 +53,7 @@ class Policy(BasePolicy):
         self._input_transform = _transforms.compose(transforms)
         self._output_transform = _transforms.compose(output_transforms)
         self._sample_kwargs = sample_kwargs or {}
+        self._warmup_observation = warmup_observation
         self._metadata = metadata or {}
         self._is_pytorch_model = is_pytorch
         self._pytorch_device = pytorch_device
@@ -69,7 +72,10 @@ class Policy(BasePolicy):
         if self._is_pytorch_model:
             return
 
-        actions = self._sample_actions(jax.random.key(0), self._model.fake_obs(), **self._sample_kwargs)
+        if self._warmup_observation is None:
+            raise ValueError("warmup_observation is required to warm up a JAX policy")
+
+        actions = self._sample_actions(jax.random.key(0), self._warmup_observation, **self._sample_kwargs)
         jax.tree.map(
             lambda value: value.block_until_ready() if hasattr(value, "block_until_ready") else value,
             actions,
