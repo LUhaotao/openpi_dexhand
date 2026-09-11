@@ -2,7 +2,7 @@ import dataclasses
 import enum
 import logging
 import multiprocessing
-import socket
+# import socket
 from typing import Literal
 
 import tyro
@@ -148,9 +148,10 @@ def main(args: Args) -> None:
     if args.record:
         policy = _policy.PolicyRecorder(policy, "policy_records")
 
-    hostname = socket.gethostname()
-    local_ip = socket.gethostbyname(hostname)
-    logging.info("Creating server (host: %s, ip: %s)", hostname, local_ip)
+    # hostname = socket.gethostname()
+    # local_ip = socket.gethostbyname(hostname)
+    # logging.info("Creating server (host: %s, ip: %s)", hostname, local_ip)
+    logging.info("Creating server on 0.0.0.0:%s", args.port)
 
     server = websocket_policy_server.WebsocketPolicyServer(
         policy=policy,
