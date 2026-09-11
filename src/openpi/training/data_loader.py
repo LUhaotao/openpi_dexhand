@@ -1,4 +1,4 @@
-from collections.abc import Iterator, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 import logging
 import multiprocessing
 import os
@@ -60,6 +60,75 @@ class TransformedDataset(Dataset[T_co]):
 
     def __len__(self) -> int:
         return len(self._dataset)
+
+
+class _DelayedObservationTransform:
+    """Apply a random chunk-aligned observation delay during JAX training.
+
+    The raw LeRobot dataset is configured to return the current observation and
+    the observations at each possible delayed chunk. This transform selects one
+    delay per sample, shifts images to ``t - d * chunk_size``, and optionally
+    shifts the state when it is encoded into the discrete prompt.
+
+    Actions are always processed from the current state. This keeps delta-action
+    targets relative to the state used by the runtime output transform, even
+    when the model's discrete state token is delayed.
+    """
+
+    def __init__(
+        self,
+        repack_transforms: Sequence[_transforms.DataTransformFn],
+        data_transforms: Sequence[_transforms.DataTransformFn],
+        *,
+        max_delay_chunks: int,
+        discrete_state_input: bool,
+    ):
+        self._repack = _transforms.compose(repack_transforms)
+        self._data = _transforms.compose(data_transforms)
+        self._max_delay_chunks = max_delay_chunks
+        self._discrete_state_input = discrete_state_input
+
+    def __call__(self, data: dict) -> dict:
+        data = self._repack(data)
+        images = data.get("images")
+        if not isinstance(images, Mapping) or not images:
+            raise ValueError("Observation delay requires repack transforms to provide non-empty 'images'.")
+
+        delay_chunks = int(np.random.randint(0, self._max_delay_chunks + 1))
+        expected_history_length = self._max_delay_chunks + 1
+        delayed_images = {}
+        for name, image in images.items():
+            image_array = np.asarray(image)
+            if image_array.ndim < 4 or image_array.shape[0] != expected_history_length:
+                raise ValueError(
+                    f"Expected image history of length {expected_history_length} for {name}, "
+                    f"got shape {image_array.shape}."
+                )
+            delayed_images[name] = image_array[delay_chunks]
+
+        delayed_data = {**data, "images": delayed_images}
+        if not self._discrete_state_input:
+            return self._data(delayed_data)
+
+        state = np.asarray(data.get("state"))
+        if state.ndim < 2 or state.shape[0] != expected_history_length:
+            raise ValueError(
+                "Discrete-state observation delay requires a state history of "
+                f"length {expected_history_length}, got shape {state.shape}."
+            )
+
+        # Process actions against the current state. The delayed state is only
+        # substituted into the final model input after all robot/action transforms.
+        current_data = {**delayed_data, "state": state[0]}
+        current_processed = self._data(current_data)
+
+        delayed_state_data = {**delayed_data, "state": state[delay_chunks]}
+        delayed_state_data.pop("actions", None)
+        delayed_processed = self._data(delayed_state_data)
+        if "state" not in delayed_processed:
+            raise ValueError("Data transforms must provide 'state' for discrete-state observation delay.")
+        current_processed["state"] = delayed_processed["state"]
+        return current_processed
 
 
 class IterableTransformedDataset(IterableDataset[T_co]):
@@ -128,7 +197,11 @@ class FakeDataset(Dataset):
 
 
 def create_torch_dataset(
-    data_config: _config.DataConfig, action_horizon: int, model_config: _model.BaseModelConfig
+    data_config: _config.DataConfig,
+    action_horizon: int,
+    model_config: _model.BaseModelConfig,
+    *,
+    apply_observation_delay: bool = False,
 ) -> Dataset:
     """Create a dataset for training."""
     repo_id = data_config.repo_id
@@ -138,17 +211,84 @@ def create_torch_dataset(
         return FakeDataset(model_config, num_samples=1024)
 
     dataset_meta = lerobot_dataset.LeRobotDatasetMetadata(repo_id)
+    delta_timestamps = {
+        key: [t / dataset_meta.fps for t in range(action_horizon)] for key in data_config.action_sequence_keys
+    }
+    if apply_observation_delay:
+        _add_observation_delay_timestamps(delta_timestamps, data_config, dataset_meta, model_config)
+
     dataset = lerobot_dataset.LeRobotDataset(
         data_config.repo_id,
-        delta_timestamps={
-            key: [t / dataset_meta.fps for t in range(action_horizon)] for key in data_config.action_sequence_keys
-        },
+        delta_timestamps=delta_timestamps,
     )
 
     if data_config.prompt_from_task:
         dataset = TransformedDataset(dataset, [_transforms.PromptFromLeRobotTask(dataset_meta.tasks)])
 
     return dataset
+
+
+def _string_leaves(value: typing.Any) -> tuple[str, ...]:
+    if isinstance(value, str):
+        return (value,)
+    if isinstance(value, Mapping):
+        return tuple(key for child in value.values() for key in _string_leaves(child))
+    if isinstance(value, list | tuple):
+        return tuple(key for child in value for key in _string_leaves(child))
+    return ()
+
+
+def _repack_source_keys(data_config: _config.DataConfig, destination: str) -> tuple[str, ...]:
+    for transform in data_config.repack_transforms.inputs:
+        if isinstance(transform, _transforms.RepackTransform):
+            structure = transform.structure
+            if isinstance(structure, Mapping) and destination in structure:
+                return _string_leaves(structure[destination])
+    return ()
+
+
+def _observation_delay_settings(model_config: _model.BaseModelConfig) -> tuple[int, int, bool]:
+    max_delay_chunks = int(getattr(model_config, "observation_delay_max_chunks", 0))
+    chunk_size = int(getattr(model_config, "streaming_chunk_size", 1))
+    discrete_state_input = bool(getattr(model_config, "discrete_state_input", False))
+    if max_delay_chunks < 0:
+        raise ValueError("observation_delay_max_chunks must be non-negative")
+    if chunk_size < 1:
+        raise ValueError("streaming_chunk_size must be positive when observation delay is enabled")
+    return max_delay_chunks, chunk_size, discrete_state_input
+
+
+def _add_observation_delay_timestamps(
+    delta_timestamps: dict[str, list[float]],
+    data_config: _config.DataConfig,
+    dataset_meta,
+    model_config: _model.BaseModelConfig,
+) -> None:
+    """Add current-to-past observation timestamps for the JAX delay transform."""
+    max_delay_chunks, chunk_size, discrete_state_input = _observation_delay_settings(model_config)
+    if max_delay_chunks == 0:
+        return
+
+    delay_timestamps = [-(delay * chunk_size) / dataset_meta.fps for delay in range(max_delay_chunks + 1)]
+    image_sources = tuple(
+        dict.fromkeys(key for key in _repack_source_keys(data_config, "images") if key in dataset_meta.camera_keys)
+    )
+    if not image_sources:
+        raise ValueError(
+            "observation_delay_max_chunks requires a RepackTransform with dataset camera keys under 'images'."
+        )
+    for key in image_sources:
+        delta_timestamps[key] = delay_timestamps
+
+    if not discrete_state_input:
+        return
+
+    state_sources = _repack_source_keys(data_config, "state")
+    if len(state_sources) != 1 or state_sources[0] not in dataset_meta.features:
+        raise ValueError(
+            "Discrete-state observation delay requires exactly one valid state source in the RepackTransform."
+        )
+    delta_timestamps[state_sources[0]] = delay_timestamps
 
 
 def create_rlds_dataset(
@@ -169,7 +309,14 @@ def create_rlds_dataset(
     )
 
 
-def transform_dataset(dataset: Dataset, data_config: _config.DataConfig, *, skip_norm_stats: bool = False) -> Dataset:
+def transform_dataset(
+    dataset: Dataset,
+    data_config: _config.DataConfig,
+    *,
+    model_config: _model.BaseModelConfig | None = None,
+    apply_observation_delay: bool = False,
+    skip_norm_stats: bool = False,
+) -> Dataset:
     """Transform the dataset by applying the data transforms."""
     norm_stats = {}
     if data_config.repo_id != "fake" and not skip_norm_stats:
@@ -180,11 +327,29 @@ def transform_dataset(dataset: Dataset, data_config: _config.DataConfig, *, skip
             )
         norm_stats = data_config.norm_stats
 
+    if apply_observation_delay:
+        if model_config is None:
+            raise ValueError("model_config is required when observation delay is enabled")
+        max_delay_chunks, _, discrete_state_input = _observation_delay_settings(model_config)
+        input_transforms = (
+            [
+                _DelayedObservationTransform(
+                    data_config.repack_transforms.inputs,
+                    data_config.data_transforms.inputs,
+                    max_delay_chunks=max_delay_chunks,
+                    discrete_state_input=discrete_state_input,
+                )
+            ]
+            if max_delay_chunks > 0
+            else [*data_config.repack_transforms.inputs, *data_config.data_transforms.inputs]
+        )
+    else:
+        input_transforms = [*data_config.repack_transforms.inputs, *data_config.data_transforms.inputs]
+
     return TransformedDataset(
         dataset,
         [
-            *data_config.repack_transforms.inputs,
-            *data_config.data_transforms.inputs,
+            *input_transforms,
             _transforms.Normalize(norm_stats, use_quantiles=data_config.use_quantile_norm),
             *data_config.model_transforms.inputs,
         ],
@@ -299,8 +464,20 @@ def create_torch_data_loader(
             execute in the main process.
         seed: The seed to use for shuffling the data.
     """
-    dataset = create_torch_dataset(data_config, action_horizon, model_config)
-    dataset = transform_dataset(dataset, data_config, skip_norm_stats=skip_norm_stats)
+    apply_observation_delay = framework == "jax" and data_config.repo_id != "fake"
+    dataset = create_torch_dataset(
+        data_config,
+        action_horizon,
+        model_config,
+        apply_observation_delay=apply_observation_delay,
+    )
+    dataset = transform_dataset(
+        dataset,
+        data_config,
+        model_config=model_config,
+        apply_observation_delay=apply_observation_delay,
+        skip_norm_stats=skip_norm_stats,
+    )
 
     # Use TorchDataLoader for both frameworks
     # For PyTorch DDP, create DistributedSampler and divide batch size by world size

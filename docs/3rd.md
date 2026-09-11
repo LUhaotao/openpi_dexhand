@@ -30,7 +30,7 @@
 
 1. https://github.com/hku-sail/StreamPI，streamPI，这一篇是做记忆的，但是做了**滑动KVCache，basecode还是openpi**，后续要上滑动KVCache的时候参考
 
-2. https://github.com/pi-r2-flow/Isaac-GR00T.git，Pi-R2，实现了**diffusion forcing的滑动窗口**
+2. https://github.com/pi-r2-flow/Isaac-GR00T.git，Pi-R2，实现了**diffusion forcing的滑动窗口**，一些细节，为了保障推理时KVCache可能的陈旧，其训练时会随机延迟observation
 
 3. https://arxiv.org/pdf/2608.25798v1，TacForcing:，这一篇是最为接近我们想法的，diffusion forcing + 触觉，他的状态使用在了离散部分，保持pi05的原始信息，但是没有开源**我们要加速了**，这一篇在UniVTAC上面跑了，我们也跑这个，这篇论文给出了触觉注入方式**动作 token 作为 query，触觉 token 作为 key**，同时只允许当前即将执行token看触觉（EATA，这里做了消融，只给当前token会更好）
 

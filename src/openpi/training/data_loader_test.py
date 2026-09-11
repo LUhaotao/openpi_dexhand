@@ -1,10 +1,119 @@
 import dataclasses
+from types import SimpleNamespace
 
 import jax
+import numpy as np
 
 from openpi.models import pi0_config
 from openpi.training import config as _config
 from openpi.training import data_loader as _data_loader
+import openpi.transforms as _transforms
+
+
+def test_delayed_observation_transform_delays_images_and_discrete_state(monkeypatch):
+    repack = _transforms.RepackTransform(
+        {
+            "images": {"camera": "observation.images.camera"},
+            "state": "observation.state",
+            "actions": "action",
+        }
+    )
+    transform = _data_loader._DelayedObservationTransform(  # noqa: SLF001
+        [repack],
+        [_transforms.DeltaActions(mask=[True])],
+        max_delay_chunks=2,
+        discrete_state_input=True,
+    )
+    monkeypatch.setattr(np.random, "randint", lambda *args: 2)
+
+    result = transform(
+        {
+            "observation.images.camera": np.asarray(
+                [
+                    np.full((2, 2, 3), 10, dtype=np.uint8),
+                    np.full((2, 2, 3), 20, dtype=np.uint8),
+                    np.full((2, 2, 3), 30, dtype=np.uint8),
+                ]
+            ),
+            "observation.state": np.asarray([[1.0], [2.0], [3.0]], dtype=np.float32),
+            "action": np.asarray([[5.0]], dtype=np.float32),
+        }
+    )
+
+    np.testing.assert_array_equal(result["images"]["camera"], 30)
+    np.testing.assert_array_equal(result["state"], [3.0])
+    # Delta actions stay relative to the current state (1.0), not the delayed state (3.0).
+    np.testing.assert_array_equal(result["actions"], [[4.0]])
+
+
+def test_delayed_observation_transform_keeps_continuous_state_current(monkeypatch):
+    repack = _transforms.RepackTransform(
+        {
+            "images": {"camera": "observation.images.camera"},
+            "state": "observation.state",
+        }
+    )
+    transform = _data_loader._DelayedObservationTransform(  # noqa: SLF001
+        [repack],
+        [],
+        max_delay_chunks=1,
+        discrete_state_input=False,
+    )
+    monkeypatch.setattr(np.random, "randint", lambda *args: 1)
+
+    result = transform(
+        {
+            "observation.images.camera": np.asarray(
+                [
+                    np.full((2, 2, 3), 10, dtype=np.uint8),
+                    np.full((2, 2, 3), 20, dtype=np.uint8),
+                ]
+            ),
+            "observation.state": np.asarray([7.0], dtype=np.float32),
+        }
+    )
+
+    np.testing.assert_array_equal(result["images"]["camera"], 20)
+    np.testing.assert_array_equal(result["state"], [7.0])
+
+
+def test_observation_delay_timestamps_use_chunk_size_for_images_and_discrete_state():
+    data_config = _config.DataConfig(
+        repack_transforms=_transforms.Group(
+            inputs=[
+                _transforms.RepackTransform(
+                    {
+                        "images": {"camera": "observation.images.camera"},
+                        "state": "observation.state",
+                    }
+                )
+            ]
+        )
+    )
+    model_config = pi0_config.Pi0Config(
+        pi05=True,
+        action_horizon=10,
+        streaming=True,
+        streaming_chunk_size=5,
+        observation_delay_max_chunks=2,
+        discrete_state_input=True,
+    )
+    delta_timestamps = {"action": [0.0]}
+    dataset_meta = SimpleNamespace(
+        fps=10,
+        camera_keys=["observation.images.camera"],
+        features={"observation.state": {"dtype": "float32"}},
+    )
+
+    _data_loader._add_observation_delay_timestamps(  # noqa: SLF001
+        delta_timestamps,
+        data_config,
+        dataset_meta,
+        model_config,
+    )
+
+    assert delta_timestamps["observation.images.camera"] == [0.0, -0.5, -1.0]
+    assert delta_timestamps["observation.state"] == [0.0, -0.5, -1.0]
 
 
 def test_torch_data_loader():
