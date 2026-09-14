@@ -721,10 +721,9 @@ class TrainConfig:
 def make_univtac_streaming_config(dataset_name: str, *, use_tactile: bool = False) -> TrainConfig:
     dataset_dir = f"/public/node01/users/lvrui/datasets/lerobot/univtac/{dataset_name}"
     return TrainConfig(
-        name=f"pi05_UniVTAC_{dataset_name}{'_tactile' if use_tactile else ''}_streaming",
+        name=f"pi05_UniVTAC_{dataset_name}{'_tactile' if use_tactile else ''}",
         model=pi0_config.Pi0Config(
             pi05=True,
-            streaming=True,
             use_tactile=use_tactile,
         ),
         data=LeRobotUniVTACDataConfig(
