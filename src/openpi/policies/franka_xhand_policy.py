@@ -5,6 +5,7 @@ import einops
 import numpy as np
 
 from openpi import transforms
+from openpi.models import pi0_config as _pi0_config
 
 
 @dataclasses.dataclass(frozen=True)
@@ -86,6 +87,7 @@ def _to_hwc_uint8(img: np.ndarray) -> np.ndarray:
 
 def _to_marker(marker: np.ndarray, name: str) -> np.ndarray:
     marker = np.asarray(marker, dtype=np.float32)
-    if marker.shape != (2, 1200, 2):
-        raise ValueError(f"Expected {name} to have shape (2, 1200, 2), got {marker.shape}")
+    expected_shape = _pi0_config.TACTILE_MARKER_SHAPE
+    if marker.shape != expected_shape:
+        raise ValueError(f"Expected {name} to have shape {expected_shape}, got {marker.shape}")
     return marker

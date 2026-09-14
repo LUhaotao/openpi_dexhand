@@ -128,6 +128,16 @@ def test_pi0_config_snapshot_round_trip(tmp_path):
     }
 
 
+def test_pi05_false_discrete_state_input_is_preserved_in_snapshot(tmp_path):
+    config = _pi0_config.Pi0Config(pi05=True, discrete_state_input=False)
+
+    _pi0_config.save_snapshot(tmp_path, config)
+
+    snapshot = json.loads((tmp_path / _pi0_config.SNAPSHOT_FILENAME).read_text())
+    assert snapshot["discrete_state_input"] is False
+    assert _pi0_config.load_snapshot(tmp_path).discrete_state_input is False
+
+
 def test_action_attention_is_bidirectional_within_causal_streaming_chunks():
     ar_mask = _action_ar_mask(action_horizon=6, chunk_size=2)
     assert ar_mask == [True, False, True, False, True, False]
@@ -310,6 +320,8 @@ def test_pi05_tactile_marker_modulates_adarms_condition():
 
     assert observation.tactile_left_marker is not None
     assert observation.tactile_right_marker is not None
+    assert observation.tactile_left_marker.shape == (1, *_pi0_config.TACTILE_MARKER_SHAPE)
+    assert observation.tactile_right_marker.shape == (1, *_pi0_config.TACTILE_MARKER_SHAPE)
     assert tactile_condition is not None
     assert adarms_cond.shape == (1, 64)
     assert jnp.allclose(adarms_cond, time_condition + tactile_condition)
@@ -327,7 +339,9 @@ def test_checkpoint_loader_keeps_new_state_projection_initialized(tmp_path, monk
     params = {
         "action_in_proj": {"kernel": np.zeros((32, 1024), dtype=np.float32)},
         "state_proj": {"kernel": np.full((32, 1024), 7.0, dtype=np.float32)},
-        "marker_mlp_in": {"kernel": np.full((4800, 512), 8.0, dtype=np.float32)},
+        "marker_mlp_in": {
+            "kernel": np.full((_pi0_config.TACTILE_MARKER_INPUT_DIM, 512), 8.0, dtype=np.float32)
+        },
     }
 
     result = loader.load(params)

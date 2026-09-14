@@ -66,6 +66,36 @@ client：
 # noise-tokens表示去噪的token数
 ```
 
+### fake client 测试延迟
+
+`fake_client.py` 使用固定 shape 的全零 observation，不需要在客户端安装 JAX 或启动仿真环境。
+VLM latency 包括请求上传、prefix 推理、KV cache materialize 以及在 VLM 侧保留为可拉取 cache 的时间；
+FM latency 只测已有 active KV cache 上的一次运行态 forward；ALL latency 测量
+`VLM encode_prefix → FM 拉取并激活 KV cache → FM forward` 的完整运行态链路。
+
+先在 `scripts/test_fake_client_latency.sh` 顶部设置 VLM 和 FM 两个远端 endpoint：
+
+```bash
+VLM_HOST=10.0.0.11
+VLM_PORT=8001
+FM_HOST=10.0.0.11
+FM_PORT=8000
+```
+
+启动对应 server 后运行：
+
+```bash
+bash scripts/test_fake_client_latency.sh
+```
+
+默认会依次测试 VLM、FM、ALL。可以通过修改 bash 脚本中的环境变量调整 warmup、runs、`num_steps`、
+`noise_tokens`、streaming chunk size 和 observation profile。FM 默认使用已初始化的 `stream_infer`；
+对于非 streaming checkpoint，可以将 `FAKE_FM_MODE=infer`。将 `FAKE_NOISE_TOKENS` 设为空时，
+infer 模式使用完整 action horizon。
+
+FM 的初始 cache setup 和 streaming seed 在正式计时前完成；计时过程中不清理 cache。ALL 的每个样本
+都会同步等待 FM 激活本次 VLM 生成的新 cache，确保 cache 拉取延迟被计入。
+
 ### UniVTAC streaming（两张 GPU）
 
 在推理机器上分别启动两个 role。VLM 与 FM 在同一台机器时，FM 的 `--vlm-host` 保持 `127.0.0.1`：

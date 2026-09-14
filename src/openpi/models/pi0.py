@@ -149,7 +149,7 @@ class Pi0(_model.BaseModel):
             self.time_mlp_in = nnx.Linear(action_expert_config.width, action_expert_config.width, rngs=rngs)
             self.time_mlp_out = nnx.Linear(action_expert_config.width, action_expert_config.width, rngs=rngs)
             if self.use_tactile:
-                self.marker_mlp_in = nnx.Linear(4800, 512, rngs=rngs)
+                self.marker_mlp_in = nnx.Linear(pi0_config.TACTILE_MARKER_INPUT_DIM, 512, rngs=rngs)
                 self.marker_mlp_out = nnx.Linear(512, action_expert_config.width, rngs=rngs)
                 self.marker_fusion = nnx.Linear(2 * action_expert_config.width, action_expert_config.width, rngs=rngs)
         else:
@@ -201,7 +201,7 @@ class Pi0(_model.BaseModel):
         if obs.tactile_left_marker is None or obs.tactile_right_marker is None:
             raise ValueError("use_tactile=True requires both tactile marker fields")
 
-        def encode(marker: at.Float[at.Array, "b 2 1200 2"]) -> at.Float[at.Array, "b emb"]:
+        def encode(marker: at.Float[at.Array, "b 2 63 2"]) -> at.Float[at.Array, "b emb"]:
             marker = marker / jnp.asarray((320.0, 240.0), dtype=marker.dtype)
             marker = marker.reshape(marker.shape[0], -1)
             marker = self.marker_mlp_in(marker)

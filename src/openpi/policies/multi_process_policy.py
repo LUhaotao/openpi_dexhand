@@ -14,6 +14,7 @@ import jax.numpy as jnp
 import numpy as np
 
 from openpi.models import model as _model
+from openpi.models import pi0_config as _pi0_config
 from openpi.policies import policy as _policy
 from openpi.serving.multiprocess import decode_prefix_cache
 from openpi.serving.multiprocess import make_cache_envelope
@@ -91,12 +92,12 @@ class MultiProcessPolicy:
             image_masks={key: jnp.ones((1,), dtype=jnp.bool_) for key in _model.IMAGE_KEYS},
             state=jnp.ones((1, self.policy._model.action_dim), dtype=jnp.float32),  # noqa: SLF001
             tactile_left_marker=(
-                jnp.ones((1, 2, 1200, 2), dtype=jnp.float32)
+                jnp.ones((1, *_pi0_config.TACTILE_MARKER_SHAPE), dtype=jnp.float32)
                 if getattr(self.policy._model, "use_tactile", False)
                 else None
             ),
             tactile_right_marker=(
-                jnp.ones((1, 2, 1200, 2), dtype=jnp.float32)
+                jnp.ones((1, *_pi0_config.TACTILE_MARKER_SHAPE), dtype=jnp.float32)
                 if getattr(self.policy._model, "use_tactile", False)
                 else None
             ),
@@ -194,6 +195,9 @@ class MultiProcessPolicy:
     def _refresh_prefix(self, request: dict[str, Any]) -> dict[str, Any]:
         if self.vlm_port is None:
             raise ValueError("vlm_port is required for FM refresh")
+        wait_for_activation = request.get("wait_for_activation", False)
+        if not isinstance(wait_for_activation, bool):
+            raise ValueError("wait_for_activation must be a boolean")
         with self._cache_lock:
             self._refresh_generation += 1
             generation = self._refresh_generation
@@ -202,7 +206,7 @@ class MultiProcessPolicy:
                 self._initial_error = None
                 self._initial_ready.clear()
         future: concurrent.futures.Future | None = None
-        if not has_active_cache:
+        if wait_for_activation or not has_active_cache:
             future = concurrent.futures.Future()
         self._enqueue_refresh(generation, request, future)
         if future is not None:

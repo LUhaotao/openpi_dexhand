@@ -31,6 +31,38 @@ def test_reset_stream_can_clear_prefix_cache():
     assert policy._refresh_generation == 5
 
 
+def test_refresh_prefix_can_wait_for_active_cache(monkeypatch):
+    policy = object.__new__(MultiProcessPolicy)
+    policy._cache_lock = threading.Lock()
+    policy._refresh_generation = 4
+    policy._cache_id = 7
+    policy._cache_version = "model:7"
+    policy._prefix_cache = {"cache": "active"}
+    policy._pending_cache = None
+    policy._initial_ready = threading.Event()
+    policy._initial_error = None
+    policy.vlm_port = 8001
+
+    def enqueue_refresh(generation, request, future):
+        assert generation == 5
+        assert future is not None
+        policy._pending_cache = (8, request["cache_version"], {"cache": "new"})
+        future.set_result({"cache_id": 8, "cache_version": request["cache_version"]})
+
+    monkeypatch.setattr(policy, "_enqueue_refresh", enqueue_refresh)
+
+    result = policy._refresh_prefix({
+        "cache_id": 8,
+        "cache_version": "model:8",
+        "wait_for_activation": True,
+    })
+
+    assert result["status"] == "active"
+    assert result["active_cache_id"] == 8
+    assert policy._cache_version == "model:8"
+    assert policy._prefix_cache == {"cache": "new"}
+
+
 def test_seed_streaming_state_keeps_clean_chunk_before_future_window(monkeypatch):
     policy = object.__new__(MultiProcessPolicy)
     policy._rng = jax.random.key(0)

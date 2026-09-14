@@ -95,8 +95,8 @@ class Observation(Generic[ArrayT]):
     state: at.Float[ArrayT, "*b s"]
 
     # Optional left/right GelSight marker coordinates.
-    tactile_left_marker: at.Float[ArrayT, "*b 2 1200 2"] | None = None
-    tactile_right_marker: at.Float[ArrayT, "*b 2 1200 2"] | None = None
+    tactile_left_marker: at.Float[ArrayT, "*b 2 63 2"] | None = None
+    tactile_right_marker: at.Float[ArrayT, "*b 2 63 2"] | None = None
 
     # Tokenized prompt.
     tokenized_prompt: at.Int[ArrayT, "*b l"] | None = None

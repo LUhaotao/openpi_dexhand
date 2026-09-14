@@ -19,6 +19,13 @@ if TYPE_CHECKING:
 
 SNAPSHOT_FILENAME = "pi0_config.json"
 
+# UniVTAC's native GS Mini marker grid is 9 x 7.  The dataset may have been
+# generated with a larger padded marker capacity, but the padded entries do
+# not represent independent observations.
+TACTILE_MARKER_COUNT = 63
+TACTILE_MARKER_SHAPE = (2, TACTILE_MARKER_COUNT, 2)
+TACTILE_MARKER_INPUT_DIM = 2 * TACTILE_MARKER_COUNT * 2
+
 
 @dataclasses.dataclass(frozen=True)
 class Pi0Config(_model.BaseModelConfig):
@@ -108,7 +115,7 @@ class Pi0Config(_model.BaseModelConfig):
     def inputs_spec(self, *, batch_size: int = 1) -> tuple[_model.Observation, _model.Actions]:
         image_spec = jax.ShapeDtypeStruct([batch_size, *_model.IMAGE_RESOLUTION, 3], jnp.float32)
         image_mask_spec = jax.ShapeDtypeStruct([batch_size], jnp.bool_)
-        marker_spec = jax.ShapeDtypeStruct([batch_size, 2, 1200, 2], jnp.float32)
+        marker_spec = jax.ShapeDtypeStruct([batch_size, *TACTILE_MARKER_SHAPE], jnp.float32)
 
         with at.disable_typechecking():
             observation_spec = _model.Observation(
@@ -168,7 +175,12 @@ def save_snapshot(directory: str | pathlib.Path, config: Pi0Config) -> pathlib.P
     """Save only model settings that differ from the original Pi0 defaults."""
     path = pathlib.Path(directory) / SNAPSHOT_FILENAME
     path.parent.mkdir(parents=True, exist_ok=True)
+    # Compare derived fields against defaults for the same model family. Keep
+    # the pi05 marker itself compared against the base Pi0 default so it is
+    # still persisted when true.
     defaults = dataclasses.asdict(Pi0Config())
+    defaults["max_token_len"] = 200 if config.pi05 else 48
+    defaults["discrete_state_input"] = config.pi05
     values = dataclasses.asdict(config)
     snapshot = {name: value for name, value in values.items() if value != defaults[name]}
     # These are derived from pi05 and do not need to be persisted when unchanged.

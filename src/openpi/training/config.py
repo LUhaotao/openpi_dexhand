@@ -731,6 +731,11 @@ def make_univtac_streaming_config(dataset_name: str, *, use_tactile: bool = Fals
             repo_id=dataset_dir,
             assets=AssetsConfig(asset_id=dataset_dir),
         ),
+        policy_metadata=(
+            {"marker_count": pi0_config.TACTILE_MARKER_COUNT}
+            if use_tactile
+            else None
+        ),
         weight_loader=weight_loaders.CheckpointWeightLoader("ckpt/pi0_ckpt/pi05_base/params"),
         num_train_steps=4000,
         batch_size=64,
