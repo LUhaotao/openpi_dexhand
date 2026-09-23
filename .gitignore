@@ -170,3 +170,4 @@ cython_debug/
 
 ckpt/
 docs/read_formsf.md
+results/

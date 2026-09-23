@@ -718,8 +718,8 @@ class TrainConfig:
         if self.resume and self.overwrite:
             raise ValueError("Cannot resume and overwrite at the same time.")
 
-def make_univtac_streaming_config(dataset_name: str, *, use_tactile: bool = False) -> TrainConfig:
-    dataset_dir = f"/public/node01/users/lvrui/datasets/lerobot/univtac/{dataset_name}"
+def make_univtac_config(dataset_name: str, *, use_tactile: bool = False) -> TrainConfig:
+    dataset_dir = f"/public/node01/users/lvrui/datasets/lerobot/univtac_backup/{dataset_name}"
     return TrainConfig(
         name=f"pi05_UniVTAC_{dataset_name}{'_tactile' if use_tactile else ''}",
         model=pi0_config.Pi0Config(
@@ -740,7 +740,7 @@ def make_univtac_streaming_config(dataset_name: str, *, use_tactile: bool = Fals
         batch_size=64,
         log_interval=100,
         save_interval=5000,
-        keep_period=10_000,
+        keep_period=5000,
         num_workers=48,
     )
 
@@ -2134,7 +2134,7 @@ _CONFIGS = [
         name="pi05_franka_xhand_flower_streaming",
         # Keep action_dim=32 to stay checkpoint-compatible with pi05_base.
         # The 18-D franka+xhand state/action is padded before entering the model.
-        model=pi0_config.Pi0Config(pi05=True, discrete_state_input=False, streaming=True, streaming_chunk_size=5, action_horizon=50, observation_delay_max_chunks=0),
+        model=pi0_config.Pi0Config(pi05=True, discrete_state_input=False),
         data=LeRobotFrankaXHandDataConfig(
             repo_id="/public/node01/users/lvrui/datasets/lerobot/flower_xhand_franka",
             assets=AssetsConfig(asset_id="/public/node01/users/lvrui/datasets/lerobot/flower_xhand_franka"),
@@ -2162,7 +2162,7 @@ _CONFIGS = [
         batch_size=32,
         log_interval=100,
         save_interval=5000,
-        keep_period=10_000,
+        keep_period=5000,
         num_workers=48,
     ),
     
@@ -2170,7 +2170,7 @@ _CONFIGS = [
         name="pi05_franka_xhand_flower_streaming_v2",
         # Keep action_dim=32 to stay checkpoint-compatible with pi05_base.
         # The 18-D franka+xhand state/action is padded before entering the model.
-        model=pi0_config.Pi0Config(pi05=True, discrete_state_input=True, streaming=True, streaming_chunk_size=5, action_horizon=50),
+        model=pi0_config.Pi0Config(pi05=True, discrete_state_input=True),
         data=LeRobotFrankaXHandDataConfig(
             repo_id="/public/node01/users/lvrui/datasets/lerobot/flower_xhand_franka",
             assets=AssetsConfig(asset_id="/public/node01/users/lvrui/datasets/lerobot/flower_xhand_franka"),
@@ -2198,27 +2198,27 @@ _CONFIGS = [
         batch_size=32,
         log_interval=100,
         save_interval=5000,
-        keep_period=10_000,
+        keep_period=5000,
         num_workers=48,
     ),
     
     # UniVTAC datasets share the same 9-D Franka gripper pipeline.
-    make_univtac_streaming_config("grasp_classify"),
-    make_univtac_streaming_config("insert_HDMI"),
-    make_univtac_streaming_config("insert_hole"),
-    make_univtac_streaming_config("insert_tube"),
-    make_univtac_streaming_config("lift_bottle"),
-    make_univtac_streaming_config("lift_can"),
-    make_univtac_streaming_config("pull_out_key"),
-    make_univtac_streaming_config("put_bottle_in_shelf"),
-    make_univtac_streaming_config("grasp_classify", use_tactile=True),
-    make_univtac_streaming_config("insert_HDMI", use_tactile=True),
-    make_univtac_streaming_config("insert_hole", use_tactile=True),
-    make_univtac_streaming_config("insert_tube", use_tactile=True),
-    make_univtac_streaming_config("lift_bottle", use_tactile=True),
-    make_univtac_streaming_config("lift_can", use_tactile=True),
-    make_univtac_streaming_config("pull_out_key", use_tactile=True),
-    make_univtac_streaming_config("put_bottle_in_shelf", use_tactile=True),
+    make_univtac_config("grasp_classify"),
+    make_univtac_config("insert_HDMI"),
+    make_univtac_config("insert_hole"),
+    make_univtac_config("insert_tube"),
+    make_univtac_config("lift_bottle"),
+    make_univtac_config("lift_can"),
+    make_univtac_config("pull_out_key"),
+    make_univtac_config("put_bottle_in_shelf"),
+    make_univtac_config("grasp_classify", use_tactile=True),
+    make_univtac_config("insert_HDMI", use_tactile=True),
+    make_univtac_config("insert_hole", use_tactile=True),
+    make_univtac_config("insert_tube", use_tactile=True),
+    make_univtac_config("lift_bottle", use_tactile=True),
+    make_univtac_config("lift_can", use_tactile=True),
+    make_univtac_config("pull_out_key", use_tactile=True),
+    make_univtac_config("put_bottle_in_shelf", use_tactile=True),
 
     TrainConfig(
         # This config is for fine-tuning pi05-DROID on a custom (smaller) DROID dataset.

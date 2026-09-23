@@ -18,9 +18,8 @@ import openpi.transforms as transforms
 def _find_checkpoint_norm_stats_dir(checkpoint_dir: pathlib.Path, asset_id: str) -> pathlib.Path:
     """Resolve checkpoint normalization stats, tolerating renamed asset directories."""
     assets_dir = checkpoint_dir / "assets"
-    configured_dir = assets_dir / asset_id
-    if (configured_dir / "norm_stats.json").exists():
-        return configured_dir
+    if (assets_dir / "norm_stats.json").exists():
+        return assets_dir
 
     candidates = sorted(path.parent for path in assets_dir.rglob("norm_stats.json"))
     if len(candidates) == 1:
@@ -33,8 +32,7 @@ def _find_checkpoint_norm_stats_dir(checkpoint_dir: pathlib.Path, asset_id: str)
     if not candidates:
         raise FileNotFoundError(f"Norm stats file not found under {assets_dir} for asset id {asset_id!r}")
     raise FileNotFoundError(
-        f"Norm stats asset {asset_id!r} not found under {assets_dir}; "
-        f"multiple candidates exist: {candidates}"
+        f"Norm stats asset {asset_id!r} not found under {assets_dir}; multiple candidates exist: {candidates}"
     )
 
 
@@ -90,7 +88,7 @@ def create_trained_policy(
         if data_config.asset_id is None:
             raise ValueError("Asset id is required to load norm stats.")
         norm_stats_dir = _find_checkpoint_norm_stats_dir(checkpoint_dir, data_config.asset_id)
-        norm_stats = _checkpoints.load_norm_stats(norm_stats_dir.parent, norm_stats_dir.name)
+        norm_stats = _checkpoints.load_norm_stats(norm_stats_dir)
 
     # Determine the device to use for PyTorch models
     if is_pytorch and pytorch_device is None:

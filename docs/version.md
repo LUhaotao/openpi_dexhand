@@ -86,7 +86,7 @@ RTC-pir2 体现了 teacher-forcing 到 diffusion-forcing 的过程
 
 触觉数据的组成方式需要设计：
 
-- [] Marker，归一化json文件计算设计
+- [*] Marker，归一化json文件计算设计
 
 - [] 测试FiLM注入及CA注入（其实CA不是需要大量数据，而是对于encoder要求比较高，encoder数据要求大，可以考虑使用一些成型的encoder，但我们这个任务是要做快速的delta，所以还是考虑FiLM，AdaLN，guidence等方案）
 
@@ -112,9 +112,9 @@ openpi这个代码的Config记录很有问题，每一个Train-Infer必须成对
 
 - [*] 单进程server warmup
 
-- [] server runtime
+- [*] server runtime
 
-- [] 检查为什么chunk调大后会卡一下（是因为horizon带来的延迟？）
+- [*] 检查为什么chunk调大后会卡一下（是因为horizon带来的延迟？）
 
 ## version 0.2.2
 
@@ -136,4 +136,14 @@ openpi这个代码的Config记录很有问题，每一个Train-Infer必须成对
 
 1. streaming policy本身的问题，他的训练时renoise部分都是根据GT得到的，我们可以考虑使用
 
+## version 0.3
 
+- [*] tactile感知的attention gate设计，设计细节如下：
+
+1. tactile/torque -> MLP -> TCN -> sigmoid -> log -> s
+
+2. L' = QK^T/sqrt(d) + s
+
+3. 随机初始化+最后一层权重0，bias=logit(0.2) -> sigmoid(logit(0.2))=0.2
+
+4. 不同chunk分别使用一次TCN，通过位置编码区分chunk，输出不同chunk一个标量gate

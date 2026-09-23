@@ -44,7 +44,7 @@ class Pi0Config(_model.BaseModelConfig):
     # Optional streaming-style training with a per-chunk noise schedule.
     streaming: bool = False
     streaming_chunk_size: int = 5
-    streaming_attention_mode: Literal["mask", "causal", "bidirectional"] = "mask"
+    streaming_attention_mode: Literal["mask", "causal", "bidirectional"] = "bidirectional"
     streaming_constant_weight: float = 0.2
     streaming_chunk_wise_weight: float = 0.8
     streaming_token_wise_weight: float = 0.0

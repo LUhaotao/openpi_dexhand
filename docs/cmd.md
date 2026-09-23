@@ -155,3 +155,23 @@ UniVTAC client命令：
 
 
 ```
+
+### 虚拟实验
+
+```bash 
+uv run python -m exp_scripts.jax_obs_transition_probe \
+  --checkpoint /public/node01/users/lvrui/workspace/openpi_dexhand/checkpoints/pi05_franka_xhand_flower_streaming/pi05_franka_xhand_flower_streaming_training_delay/19999 \
+  --dataset /public/node01/users/lvrui/datasets/lerobot/flower_xhand_franka \
+  --config-name pi05_franka_xhand_flower_streaming \
+  --experiment all \
+  --seed 42 \
+  --max-pairs 32 \
+  --frame-gap 20 \
+  --num-noise-samples 1 \
+  --save-traces \
+  --output-dir results/pi05_franka_xhand_flower_streaming_training_delay_anchor
+
+
+uv run python -m exp_scripts.jax_obs_transition_probe   --checkpoint /public/node01/users/lvrui/workspace/openpi_dexhand/checkpoints/pi05_franka_xhand_flower_zhb_right_600   --dataset /public/node01/users/lvrui/datasets/lerobot/flower_xhand_franka   --config-name pi05_franka_xhand_flower_v2   --experiment all   --seed 42   --max-pairs 32   --frame-gap 20   --num-noise-samples 1   --save-traces   --output-dir results/pi05_franka_xhand_flower_scalar_anchor
+
+```

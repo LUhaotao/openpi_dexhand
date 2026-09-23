@@ -5,7 +5,7 @@
 要求Checkpoint命名如下：
 
 ```text
-{base_policy}_{task}_{schedule}_{tactile}
+{base_policy}_{task}_{schedule}_{tactile}_{step}
 
 base_policy —— pi05 GR00T ACT DP 等
 
@@ -16,6 +16,10 @@ schedule —— streaming full 等
     在 schedule 下可以命名不同的调度方式，如 chunk_10 noise training_delay 等，但我们更建议通过 config 快照进行实验区分，而实验命名采用简单的方式声明即可
 
 tactile —— 是否使用触觉，如 tactile_AdaLN 使用触觉且为 AdaLN 条件注入
+
+一个可供参考的命名：
+
+pi05_UniVTAC_insert_HDMI_streaming_delay_6_tactile_adaln_4000
 
 ```
 
@@ -36,4 +40,4 @@ pi05_UniVTAC_insert_HDMI_streaming_mask:
 
 pi05_UniVTAC_insert_HDMI: 12/100
 
-pi05_UniVTAC_insert_HDMI_streaming_tactile: 
+pi05_UniVTAC_insert_HDMI_streaming_delay_6_tactile: 10/100

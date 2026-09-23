@@ -10,6 +10,19 @@ def test_find_checkpoint_norm_stats_dir_falls_back_to_unique_asset(tmp_path: Pat
 
     result = _find_checkpoint_norm_stats_dir(
         tmp_path,
+        "organization/dataset",
+    )
+
+    assert result == expected
+
+
+def test_find_checkpoint_norm_stats_dir_uses_root_asset(tmp_path: Path):
+    expected = tmp_path / "assets"
+    expected.mkdir(parents=True)
+    (expected / "norm_stats.json").write_text("{}")
+
+    result = _find_checkpoint_norm_stats_dir(
+        tmp_path,
         "/data/datasets/flower_4_28",
     )
 
