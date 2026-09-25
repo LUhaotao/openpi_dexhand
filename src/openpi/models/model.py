@@ -97,6 +97,9 @@ class Observation(Generic[ArrayT]):
     # Optional left/right GelSight marker coordinates.
     tactile_left_marker: at.Float[ArrayT, "*b 2 63 2"] | None = None
     tactile_right_marker: at.Float[ArrayT, "*b 2 63 2"] | None = None
+    # Optional current-to-past marker windows for tactile temporal encoders.
+    tactile_left_marker_history: at.Float[ArrayT, "*b th 2 63 2"] | None = None
+    tactile_right_marker_history: at.Float[ArrayT, "*b th 2 63 2"] | None = None
 
     # Tokenized prompt.
     tokenized_prompt: at.Int[ArrayT, "*b l"] | None = None
@@ -128,6 +131,8 @@ class Observation(Generic[ArrayT]):
             state=data["state"],
             tactile_left_marker=data.get("tactile_left_marker"),
             tactile_right_marker=data.get("tactile_right_marker"),
+            tactile_left_marker_history=data.get("tactile_left_marker_history"),
+            tactile_right_marker_history=data.get("tactile_right_marker_history"),
             tokenized_prompt=data.get("tokenized_prompt"),
             tokenized_prompt_mask=data.get("tokenized_prompt_mask"),
             token_ar_mask=data.get("token_ar_mask"),
@@ -209,6 +214,8 @@ def preprocess_observation(
         state=observation.state,
         tactile_left_marker=observation.tactile_left_marker,
         tactile_right_marker=observation.tactile_right_marker,
+        tactile_left_marker_history=observation.tactile_left_marker_history,
+        tactile_right_marker_history=observation.tactile_right_marker_history,
         tokenized_prompt=observation.tokenized_prompt,
         tokenized_prompt_mask=observation.tokenized_prompt_mask,
         token_ar_mask=observation.token_ar_mask,

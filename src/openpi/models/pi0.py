@@ -1,6 +1,7 @@
 import logging
 
 import einops
+import flax.linen as nn
 import flax.nnx as nnx
 import flax.nnx.bridge as nnx_bridge
 import jax
@@ -14,6 +15,13 @@ import openpi.models.siglip as _siglip
 from openpi.shared import array_typing as at
 
 logger = logging.getLogger("openpi")
+
+_TACTILE_GATE_BIAS = -1.38629436112
+
+
+def _tactile_gate_bias_init(key, shape, dtype=jnp.float32):
+    del key
+    return jnp.full(shape, _TACTILE_GATE_BIAS, dtype=dtype)
 
 
 def make_attn_mask(input_mask, mask_ar):
@@ -46,7 +54,7 @@ def make_attn_mask(input_mask, mask_ar):
 
 def _action_ar_mask(action_horizon: int, chunk_size: int, mode: str = "causal") -> list[bool]:
     """Make action-block boundaries for the selected inter-chunk attention mode."""
-    if mode in ("mask", "bidirectional"):
+    if mode in ("mask", "bidirectional", "tactile_attention_gate"):
         return [index == 0 for index in range(action_horizon)]
     return [index % chunk_size == 0 for index in range(action_horizon)]
 
@@ -118,6 +126,8 @@ class Pi0(_model.BaseModel):
         self.streaming_chunk_wise_weight = config.streaming_chunk_wise_weight
         self.streaming_token_wise_weight = config.streaming_token_wise_weight
         self.use_tactile = config.use_tactile
+        self.use_tactile_adarms = config.use_tactile_adarms
+        self.tactile_history_length = config.tactile_history_length
         paligemma_config = _gemma.get_config(config.paligemma_variant)
         action_expert_config = _gemma.get_config(config.action_expert_variant)
         # TODO: rewrite gemma in NNX. For now, use bridge.
@@ -152,6 +162,21 @@ class Pi0(_model.BaseModel):
                 self.marker_mlp_in = nnx.Linear(pi0_config.TACTILE_MARKER_INPUT_DIM, 512, rngs=rngs)
                 self.marker_mlp_out = nnx.Linear(512, action_expert_config.width, rngs=rngs)
                 self.marker_fusion = nnx.Linear(2 * action_expert_config.width, action_expert_config.width, rngs=rngs)
+            if config.streaming_attention_mode == "tactile_attention_gate":
+                self.tactile_position_dim = 32
+                self.tactile_tcn_width = 256
+                self.tactile_tcn_in = nnx.Linear(
+                    action_expert_config.width + self.tactile_position_dim, self.tactile_tcn_width, rngs=rngs
+                )
+                self.tactile_tcn_1 = nnx.Linear(3 * self.tactile_tcn_width, self.tactile_tcn_width, rngs=rngs)
+                self.tactile_tcn_2 = nnx.Linear(3 * self.tactile_tcn_width, self.tactile_tcn_width, rngs=rngs)
+                self.tactile_gate_out = nnx.Linear(
+                    self.tactile_tcn_width,
+                    1,
+                    kernel_init=nn.initializers.zeros,
+                    bias_init=_tactile_gate_bias_init,
+                    rngs=rngs,
+                )
         else:
             self.state_proj = nnx.Linear(config.action_dim, action_expert_config.width, rngs=rngs)
             self.action_time_mlp_in = nnx.Linear(2 * action_expert_config.width, action_expert_config.width, rngs=rngs)
@@ -196,21 +221,79 @@ class Pi0(_model.BaseModel):
         return tokens, input_mask, ar_mask
 
     def _marker_condition(self, obs: _model.Observation) -> at.Float[at.Array, "b emb"] | None:
-        if not self.use_tactile:
+        if not self.use_tactile or not self.use_tactile_adarms:
             return None
         if obs.tactile_left_marker is None or obs.tactile_right_marker is None:
             raise ValueError("use_tactile=True requires both tactile marker fields")
 
-        def encode(marker: at.Float[at.Array, "b 2 63 2"]) -> at.Float[at.Array, "b emb"]:
-            marker = marker / jnp.asarray((320.0, 240.0), dtype=marker.dtype)
-            marker = marker.reshape(marker.shape[0], -1)
-            marker = self.marker_mlp_in(marker)
-            marker = jax.nn.gelu(marker)
-            return self.marker_mlp_out(marker)
-
-        left_embedding = encode(obs.tactile_left_marker)
-        right_embedding = encode(obs.tactile_right_marker)
+        left_embedding = self._encode_marker_frames(obs.tactile_left_marker)
+        right_embedding = self._encode_marker_frames(obs.tactile_right_marker)
         return self.marker_fusion(jnp.concatenate([left_embedding, right_embedding], axis=-1))
+
+    def _encode_marker_frames(self, marker: at.Float[at.Array, "*b 2 63 2"]) -> at.Float[at.Array, "*b emb"]:
+        marker = marker / jnp.asarray((320.0, 240.0), dtype=marker.dtype)
+        marker = marker.reshape((*marker.shape[:-3], -1))
+        marker = self.marker_mlp_in(marker)
+        marker = jax.nn.gelu(marker)
+        return self.marker_mlp_out(marker)
+
+    def _tactile_attention_log_gates(self, obs: _model.Observation) -> at.Float[at.Array, "b k"] | None:
+        if self.streaming_attention_mode != "tactile_attention_gate":
+            return None
+        return self._tactile_attention_log_gates_from_history(
+            obs.tactile_left_marker_history, obs.tactile_right_marker_history
+        )
+
+    def _tactile_attention_log_gates_from_history(
+        self,
+        left_history: at.Float[at.Array, "b th 2 63 2"] | None,
+        right_history: at.Float[at.Array, "b th 2 63 2"] | None,
+    ) -> at.Float[at.Array, "b k"] | None:
+        if self.streaming_attention_mode != "tactile_attention_gate":
+            return None
+        if left_history is None or right_history is None:
+            raise ValueError("tactile_attention_gate requires left and right marker histories")
+        if (
+            left_history.shape[1] != self.tactile_history_length
+            or right_history.shape[1] != self.tactile_history_length
+        ):
+            raise ValueError(
+                f"Expected tactile history length {self.tactile_history_length}, "
+                f"got left={left_history.shape[1]}, right={right_history.shape[1]}"
+            )
+
+        left = self._encode_marker_frames(left_history)
+        right = self._encode_marker_frames(right_history)
+        tactile = self.marker_fusion(jnp.concatenate([left, right], axis=-1))
+        batch_size, history_length, _ = tactile.shape
+        chunk_count = self.action_horizon // self.streaming_chunk_size
+        chunk_positions = (jnp.arange(chunk_count, dtype=jnp.float32) + 0.5) / chunk_count
+        position = posemb_sincos(chunk_positions, self.tactile_position_dim, min_period=0.01, max_period=1.0)
+        position = jnp.broadcast_to(
+            position[None, :, None, :], (batch_size, chunk_count, history_length, self.tactile_position_dim)
+        )
+        tactile = jnp.broadcast_to(tactile[:, None, :, :], (batch_size, chunk_count, history_length, tactile.shape[-1]))
+        x = jnp.concatenate([tactile, position], axis=-1).reshape(
+            batch_size * chunk_count, history_length, tactile.shape[-1] + self.tactile_position_dim
+        )
+        x = jax.nn.gelu(self.tactile_tcn_in(x))
+        x = jax.nn.gelu(x + self.tactile_tcn_1(self._causal_conv_inputs(x, dilation=1)))
+        x = jax.nn.gelu(x + self.tactile_tcn_2(self._causal_conv_inputs(x, dilation=2)))
+        logits = self.tactile_gate_out(x[:, -1, :]).reshape(batch_size, chunk_count)
+        return jax.nn.log_sigmoid(logits)
+
+    @staticmethod
+    def _causal_conv_inputs(x: at.Float[at.Array, "b t d"], *, dilation: int) -> at.Float[at.Array, "b t d3"]:
+        length = x.shape[1]
+        taps = []
+        for lag in (2 * dilation, dilation, 0):
+            if lag == 0:
+                taps.append(x)
+            elif lag >= length:
+                taps.append(jnp.pad(x[:, :0], ((0, 0), (length, 0), (0, 0))))
+            else:
+                taps.append(jnp.pad(x[:, :-lag], ((0, 0), (lag, 0), (0, 0))))
+        return jnp.concatenate(taps, axis=-1)
 
     @at.typecheck
     def embed_suffix(
@@ -304,6 +387,7 @@ class Pi0(_model.BaseModel):
             regime_rng,
         ) = jax.random.split(rng, 6)
         observation = _model.preprocess_observation(preprocess_rng, observation, train=train)
+        tactile_log_gates = self._tactile_attention_log_gates(observation)
 
         batch_shape = actions.shape[:-2]
         noise = jax.random.normal(noise_rng, actions.shape)
@@ -350,9 +434,21 @@ class Pi0(_model.BaseModel):
         attn_mask = self._mask_action_chunks(
             attn_mask, prefix_tokens.shape[1] + suffix_tokens.shape[1] - self.action_horizon
         )
+        action_start = prefix_tokens.shape[1] + suffix_tokens.shape[1] - self.action_horizon
+        attn_bias = self._make_action_attention_bias(
+            tactile_log_gates,
+            query_length=attn_mask.shape[1],
+            key_length=attn_mask.shape[2],
+            action_query_start=action_start,
+            action_key_start=action_start,
+        )
         positions = jnp.cumsum(input_mask, axis=1) - 1
         (prefix_out, suffix_out), _ = self.PaliGemma.llm(
-            [prefix_tokens, suffix_tokens], mask=attn_mask, positions=positions, adarms_cond=[None, adarms_cond]
+            [prefix_tokens, suffix_tokens],
+            mask=attn_mask,
+            attn_bias=attn_bias,
+            positions=positions,
+            adarms_cond=[None, adarms_cond],
         )
         v_t = self.action_out_proj(suffix_out[:, -self.action_horizon :])
 
@@ -368,6 +464,29 @@ class Pi0(_model.BaseModel):
         return attn_mask.at[:, action_start:action_end, action_start:action_end].set(
             attn_mask[:, action_start:action_end, action_start:action_end] & same_chunk[None]
         )
+
+    def _make_action_attention_bias(
+        self,
+        log_gates: at.Float[at.Array, "b k"] | None,
+        *,
+        query_length: int,
+        key_length: int,
+        action_query_start: int,
+        action_key_start: int,
+    ) -> at.Float[at.Array, "b q s"] | None:
+        if log_gates is None:
+            return None
+        chunk_size = self.streaming_chunk_size
+        chunk_ids = jnp.arange(self.action_horizon) // chunk_size
+        same_chunk = chunk_ids[:, None] == chunk_ids[None, :]
+        query_gate = log_gates[:, chunk_ids]
+        action_bias = jnp.where(same_chunk[None], 0.0, query_gate[:, :, None])
+        bias = jnp.zeros((log_gates.shape[0], query_length, key_length), dtype=jnp.float32)
+        return bias.at[
+            :,
+            action_query_start : action_query_start + self.action_horizon,
+            action_key_start : action_key_start + self.action_horizon,
+        ].set(action_bias)
 
     @override
     def sample_actions(
@@ -388,6 +507,7 @@ class Pi0(_model.BaseModel):
 
         # first fill KV cache with a forward pass of the prefix
         tactile_condition = self._marker_condition(observation)
+        tactile_log_gates = self._tactile_attention_log_gates(observation)
         prefix_tokens, prefix_mask, prefix_ar_mask = self.embed_prefix(observation)
         prefix_attn_mask = make_attn_mask(prefix_mask, prefix_ar_mask)
         positions = jnp.cumsum(prefix_mask, axis=1) - 1
@@ -410,6 +530,14 @@ class Pi0(_model.BaseModel):
             # `combined_mask` is shape (b, suffix_len, prefix_len + suffix_len) indicating how the suffix tokens (which
             # generate the queries) can attend to the full prefix + suffix sequence (which generates the keys and values)
             full_attn_mask = jnp.concatenate([prefix_attn_mask, suffix_attn_mask], axis=-1)
+            action_query_start = suffix_tokens.shape[1] - self.action_horizon
+            full_attn_bias = self._make_action_attention_bias(
+                tactile_log_gates,
+                query_length=full_attn_mask.shape[1],
+                key_length=full_attn_mask.shape[2],
+                action_query_start=action_query_start,
+                action_key_start=prefix_tokens.shape[1] + action_query_start,
+            )
             assert full_attn_mask.shape == (
                 batch_size,
                 suffix_tokens.shape[1],
@@ -421,6 +549,7 @@ class Pi0(_model.BaseModel):
             (prefix_out, suffix_out), _ = self.PaliGemma.llm(
                 [None, suffix_tokens],
                 mask=full_attn_mask,
+                attn_bias=full_attn_bias,
                 positions=positions,
                 kv_cache=kv_cache,
                 adarms_cond=[None, adarms_cond],
@@ -457,10 +586,17 @@ class Pi0(_model.BaseModel):
         num_steps: int | at.Int[at.Array, ""] = 10,
         noise: at.Float[at.Array, "b ah ad"] | None = None,
         tactile_condition: at.Float[at.Array, "b emb"] | None = None,
+        tactile_left_marker_history: at.Float[at.Array, "b th 2 63 2"] | None = None,
+        tactile_right_marker_history: at.Float[at.Array, "b th 2 63 2"] | None = None,
     ) -> _model.Actions:
         """Run flow matching using a prefix KV cache produced by ``encode_prefix``."""
-        if getattr(self, "use_tactile", False) and tactile_condition is None:
+        if getattr(self, "use_tactile_adarms", False) and tactile_condition is None:
             raise ValueError("use_tactile=True requires tactile_condition for prefix sampling")
+        tactile_log_gates = (
+            self._tactile_attention_log_gates_from_history(tactile_left_marker_history, tactile_right_marker_history)
+            if self.streaming_attention_mode == "tactile_attention_gate"
+            else None
+        )
         batch_size = state.shape[0]
         if noise is None:
             noise = jax.random.normal(rng, (batch_size, self.action_horizon, self.action_dim))
@@ -475,6 +611,7 @@ class Pi0(_model.BaseModel):
                 x_t,
                 jnp.broadcast_to(time, batch_size),
                 tactile_condition,
+                tactile_log_gates,
             )
             return x_t + dt * v_t, time + dt
 
@@ -496,12 +633,19 @@ class Pi0(_model.BaseModel):
         action_window: _model.Actions,
         advance: at.Int[at.Array, ""],
         tactile_condition: at.Float[at.Array, "b emb"] | None = None,
+        tactile_left_marker_history: at.Float[at.Array, "b th 2 63 2"] | None = None,
+        tactile_right_marker_history: at.Float[at.Array, "b th 2 63 2"] | None = None,
     ) -> _model.Actions:
         """Advance a token-wise diffusion-forcing window by completed action chunks."""
         if not self.streaming:
             raise ValueError("Streaming inference requires a model trained with streaming=True")
-        if getattr(self, "use_tactile", False) and tactile_condition is None:
+        if getattr(self, "use_tactile_adarms", False) and tactile_condition is None:
             raise ValueError("use_tactile=True requires tactile_condition for streaming")
+        tactile_log_gates = (
+            self._tactile_attention_log_gates_from_history(tactile_left_marker_history, tactile_right_marker_history)
+            if getattr(self, "streaming_attention_mode", None) == "tactile_attention_gate"
+            else None
+        )
 
         timestep = self.streaming_timestep(action_window.dtype)
         chunk_size = self.streaming_chunk_size
@@ -510,11 +654,16 @@ class Pi0(_model.BaseModel):
             step_rng, action_buffer = carry
             step_rng, noise_rng = jax.random.split(step_rng)
             actions = action_buffer[:, chunk_size:]
-            if tactile_condition is None:
+            if tactile_condition is None and tactile_log_gates is None:
                 velocity = self._velocity_from_prefix(state, prefix_cache, actions, timestep[None, :])
             else:
                 velocity = self._velocity_from_prefix(
-                    state, prefix_cache, actions, timestep[None, :], tactile_condition
+                    state,
+                    prefix_cache,
+                    actions,
+                    timestep[None, :],
+                    tactile_condition,
+                    tactile_log_gates,
                 )
             fresh_noise = jax.random.normal(
                 noise_rng,
@@ -533,6 +682,7 @@ class Pi0(_model.BaseModel):
         noisy_actions: _model.Actions,
         timestep: at.Float[at.Array, "b ..."],
         tactile_condition: at.Float[at.Array, "b emb"] | None = None,
+        tactile_log_gates: at.Float[at.Array, "b k"] | None = None,
     ) -> _model.Actions:
         """Predict flow velocity for suffix tokens against an encoded prefix."""
         kv_cache = jax.tree.map(
@@ -547,10 +697,19 @@ class Pi0(_model.BaseModel):
         suffix_attn_mask = self._mask_action_chunks(suffix_attn_mask, suffix_tokens.shape[1] - self.action_horizon)
         prefix_attn_mask = einops.repeat(prefix_pad_masks, "b p -> b s p", s=suffix_tokens.shape[1])
         full_attn_mask = jnp.concatenate([prefix_attn_mask, suffix_attn_mask], axis=-1)
+        action_query_start = suffix_tokens.shape[1] - self.action_horizon
+        full_attn_bias = self._make_action_attention_bias(
+            tactile_log_gates,
+            query_length=full_attn_mask.shape[1],
+            key_length=full_attn_mask.shape[2],
+            action_query_start=action_query_start,
+            action_key_start=prefix_pad_masks.shape[1] + action_query_start,
+        )
         positions = jnp.sum(prefix_pad_masks, axis=-1)[:, None] + jnp.cumsum(suffix_mask, axis=-1) - 1
         (_, suffix_out), _ = self.PaliGemma.llm(
             [None, suffix_tokens],
             mask=full_attn_mask,
+            attn_bias=full_attn_bias,
             positions=positions,
             kv_cache=kv_cache,
             adarms_cond=[None, adarms_cond],

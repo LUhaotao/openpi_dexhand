@@ -49,8 +49,17 @@ class FrankaXHandInputs(transforms.DataTransformFn):
         if has_left_marker != has_right_marker:
             raise ValueError("left_marker and right_marker must be provided together")
         if has_left_marker:
-            inputs["tactile_left_marker"] = _to_marker(data["left_marker"], "left_marker")
-            inputs["tactile_right_marker"] = _to_marker(data["right_marker"], "right_marker")
+            left_marker, left_history = _to_marker_input(data["left_marker"], "left_marker")
+            right_marker, right_history = _to_marker_input(data["right_marker"], "right_marker")
+            if (left_history is None) != (right_history is None):
+                raise ValueError("left_marker and right_marker must provide histories together")
+            if left_history is not None and left_history.shape[0] != right_history.shape[0]:
+                raise ValueError("left_marker and right_marker history lengths must match")
+            inputs["tactile_left_marker"] = left_marker
+            inputs["tactile_right_marker"] = right_marker
+            if left_history is not None:
+                inputs["tactile_left_marker_history"] = left_history
+                inputs["tactile_right_marker_history"] = right_history
 
         if "actions" in data:
             inputs["actions"] = np.asarray(data["actions"], dtype=np.float32)
@@ -91,3 +100,13 @@ def _to_marker(marker: np.ndarray, name: str) -> np.ndarray:
     if marker.shape != expected_shape:
         raise ValueError(f"Expected {name} to have shape {expected_shape}, got {marker.shape}")
     return marker
+
+
+def _to_marker_input(marker: np.ndarray, name: str) -> tuple[np.ndarray, np.ndarray | None]:
+    marker = np.asarray(marker, dtype=np.float32)
+    expected_shape = _pi0_config.TACTILE_MARKER_SHAPE
+    if marker.shape == expected_shape:
+        return marker, None
+    if marker.ndim == len(expected_shape) + 1 and marker.shape[1:] == expected_shape and marker.shape[0] > 0:
+        return marker[-1], marker
+    return _to_marker(marker, name), None

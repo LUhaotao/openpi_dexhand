@@ -61,7 +61,8 @@ class MultiProcessPolicy:
         self._encode_prefix_jit = nnx_utils.module_jit(self.policy._model.encode_prefix)  # noqa: SLF001
         self._encode_tactile_jit = (
             nnx_utils.module_jit(self.policy._model._marker_condition)  # noqa: SLF001
-            if getattr(self.policy._model, "use_tactile", False)
+            if getattr(self.policy._model, "use_tactile", False)  # noqa: SLF001
+            and getattr(self.policy._model, "use_tactile_adarms", False)  # noqa: SLF001
             else None
         )
         self._sample_actions_from_prefix_jit = nnx_utils.module_jit(
@@ -76,33 +77,64 @@ class MultiProcessPolicy:
         model = self.policy._model  # noqa: SLF001
         return f"{type(model).__name__}:{model.action_dim}:{model.action_horizon}"
 
-    def _prepare(self, observation: dict[str, Any]) -> _model.Observation:
-        inputs = jax.tree.map(lambda x: x, observation)
-        inputs = self.policy._input_transform(inputs)  # noqa: SLF001
-        inputs = jax.tree.map(lambda x: jnp.asarray(x)[None, ...], inputs)
-        return _model.Observation.from_dict(inputs)
+    def _prepare(
+        self,
+        observation: dict[str, Any],
+        *,
+        session_id: str = "default",
+        update_tactile_history: bool = False,
+    ) -> _model.Observation:
+        return self.policy.prepare_observation(
+            observation, session_id=session_id, update_tactile_history=update_tactile_history
+        )
 
     def warmup(self) -> None:
         """Compile the role's first inference path before accepting clients."""
+        model = self.policy._model  # noqa: SLF001
+        tactile_attention_gate = getattr(model, "streaming_attention_mode", None) == "tactile_attention_gate"
         observation = _model.Observation(
             images={
                 key: jnp.ones((1, *_model.IMAGE_RESOLUTION, 3), dtype=jnp.float32)
                 for key in _model.IMAGE_KEYS
             },
             image_masks={key: jnp.ones((1,), dtype=jnp.bool_) for key in _model.IMAGE_KEYS},
-            state=jnp.ones((1, self.policy._model.action_dim), dtype=jnp.float32),  # noqa: SLF001
+            state=jnp.ones((1, model.action_dim), dtype=jnp.float32),
             tactile_left_marker=(
                 jnp.ones((1, *_pi0_config.TACTILE_MARKER_SHAPE), dtype=jnp.float32)
-                if getattr(self.policy._model, "use_tactile", False)
+                if getattr(model, "use_tactile", False)
                 else None
             ),
             tactile_right_marker=(
                 jnp.ones((1, *_pi0_config.TACTILE_MARKER_SHAPE), dtype=jnp.float32)
-                if getattr(self.policy._model, "use_tactile", False)
+                if getattr(model, "use_tactile", False)
                 else None
             ),
-            tokenized_prompt=jnp.ones((1, self.policy._model.max_token_len), dtype=jnp.int32),  # noqa: SLF001
-            tokenized_prompt_mask=jnp.ones((1, self.policy._model.max_token_len), dtype=jnp.bool_),  # noqa: SLF001
+            tactile_left_marker_history=(
+                jnp.ones(
+                    (
+                        1,
+                        model.tactile_history_length,
+                        *_pi0_config.TACTILE_MARKER_SHAPE,
+                    ),
+                    dtype=jnp.float32,
+                )
+                if tactile_attention_gate
+                else None
+            ),
+            tactile_right_marker_history=(
+                jnp.ones(
+                    (
+                        1,
+                        model.tactile_history_length,
+                        *_pi0_config.TACTILE_MARKER_SHAPE,
+                    ),
+                    dtype=jnp.float32,
+                )
+                if tactile_attention_gate
+                else None
+            ),
+            tokenized_prompt=jnp.ones((1, model.max_token_len), dtype=jnp.int32),
+            tokenized_prompt_mask=jnp.ones((1, model.max_token_len), dtype=jnp.bool_),
         )
 
         if self.role == "vlm":
@@ -111,7 +143,7 @@ class MultiProcessPolicy:
 
         # eval_shape gives the FM a correctly-shaped cache without compiling the
         # image encoder a second time in the FM process.
-        prefix_spec = jax.eval_shape(self.policy._model.encode_prefix, observation)  # noqa: SLF001
+        prefix_spec = jax.eval_shape(model.encode_prefix, observation)
         prefix_cache = jax.tree.map(lambda value: jnp.ones(value.shape, value.dtype), prefix_spec)
         tactile_condition = self._tactile_condition(observation)
         actions = self._sample_actions_from_prefix_jit(
@@ -120,6 +152,8 @@ class MultiProcessPolicy:
             prefix_cache,
             num_steps=10,
             tactile_condition=tactile_condition,
+            tactile_left_marker_history=observation.tactile_left_marker_history,
+            tactile_right_marker_history=observation.tactile_right_marker_history,
         )
         self._block_until_ready(actions)
         if getattr(self.policy._model, "streaming", False):  # noqa: SLF001
@@ -132,6 +166,8 @@ class MultiProcessPolicy:
                 action_buffer,
                 jnp.asarray(1, dtype=jnp.int32),
                 tactile_condition=tactile_condition,
+                tactile_left_marker_history=observation.tactile_left_marker_history,
+                tactile_right_marker_history=observation.tactile_right_marker_history,
             )
             self._block_until_ready(advanced)
 
@@ -336,6 +372,9 @@ class MultiProcessPolicy:
         if not isinstance(clear_prefix_cache, bool):
             raise ValueError("clear_prefix_cache must be a boolean")
         self._streaming_state = None
+        reset_history = getattr(getattr(self, "policy", None), "reset_tactile_history", None)
+        if callable(reset_history):
+            reset_history(session_id)
         if clear_prefix_cache:
             with self._cache_lock:
                 self._refresh_generation += 1
@@ -368,7 +407,9 @@ class MultiProcessPolicy:
         if not isinstance(execution_id, int) or isinstance(execution_id, bool) or execution_id < 0:
             raise ValueError("executed_action_id must be a non-negative integer")
 
-        model_observation = self._prepare(request["observation"])
+        model_observation = self._prepare(
+            request["observation"], session_id=session_id, update_tactile_history=True
+        )
         tactile_condition = self._tactile_condition(model_observation)
         if self._streaming_state is None:
             self._streaming_state = self._seed_streaming_state(
@@ -377,6 +418,8 @@ class MultiProcessPolicy:
                 model_observation.state,
                 prefix_cache,
                 tactile_condition=tactile_condition,
+                tactile_left_marker_history=model_observation.tactile_left_marker_history,
+                tactile_right_marker_history=model_observation.tactile_right_marker_history,
                 num_steps=int(request.get("num_steps", 10)),
             )
         elif self._streaming_state.session_id != session_id:
@@ -397,6 +440,8 @@ class MultiProcessPolicy:
                     self._streaming_state.action_window,
                     jnp.asarray(completed_actions // chunk_size, dtype=jnp.int32),
                     tactile_condition=tactile_condition,
+                    tactile_left_marker_history=model_observation.tactile_left_marker_history,
+                    tactile_right_marker_history=model_observation.tactile_right_marker_history,
                 )
                 self._streaming_state.execution_id = execution_id
 
@@ -422,6 +467,8 @@ class MultiProcessPolicy:
         prefix_cache: dict[str, Any],
         *,
         tactile_condition: Any = None,
+        tactile_left_marker_history: Any = None,
+        tactile_right_marker_history: Any = None,
         num_steps: int,
     ) -> _StreamingState:
         if num_steps <= 0:
@@ -433,6 +480,8 @@ class MultiProcessPolicy:
             prefix_cache,
             num_steps=num_steps,
             tactile_condition=tactile_condition,
+            tactile_left_marker_history=tactile_left_marker_history,
+            tactile_right_marker_history=tactile_right_marker_history,
         )
         timestep = self.policy._model.streaming_timestep(actions.dtype)  # noqa: SLF001
         noise = jax.random.normal(noise_rng, actions.shape, dtype=actions.dtype)
@@ -454,12 +503,20 @@ class MultiProcessPolicy:
             raise ValueError(
                 f"Cache version mismatch: expected {expected!r}, active {cache_version!r}"
             )
-        model_observation = self._prepare(request["observation"])
+        session_id = request.get("session_id", "default")
+        model_observation = self._prepare(
+            request["observation"], session_id=session_id, update_tactile_history=True
+        )
         tactile_condition = self._tactile_condition(model_observation)
         self._rng, sample_rng = jax.random.split(self._rng)
         noise_tokens = int(request.get("noise_tokens", self.policy._model.action_horizon))  # noqa: SLF001
         if noise_tokens <= 0 or noise_tokens > self.policy._model.action_horizon:  # noqa: SLF001
             raise ValueError("noise_tokens must be in [1, action_horizon]")
+        if (
+            getattr(self.policy._model, "streaming_attention_mode", None) == "tactile_attention_gate"  # noqa: SLF001
+            and noise_tokens != self.policy._model.action_horizon  # noqa: SLF001
+        ):
+            raise ValueError("tactile_attention_gate requires noise_tokens == action_horizon")
         noise = jax.random.normal(
             sample_rng,
             (model_observation.state.shape[0], noise_tokens, self.policy._model.action_dim),  # noqa: SLF001
@@ -471,6 +528,8 @@ class MultiProcessPolicy:
             num_steps=int(request.get("num_steps", 10)),
             noise=noise,
             tactile_condition=tactile_condition,
+            tactile_left_marker_history=model_observation.tactile_left_marker_history,
+            tactile_right_marker_history=model_observation.tactile_right_marker_history,
         )
         result = self.policy._output_transform(  # noqa: SLF001
             {"state": np.asarray(model_observation.state[0]), "actions": np.asarray(actions[0])}

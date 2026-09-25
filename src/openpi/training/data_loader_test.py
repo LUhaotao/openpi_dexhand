@@ -116,6 +116,44 @@ def test_observation_delay_timestamps_use_chunk_size_for_images_and_discrete_sta
     assert delta_timestamps["observation.state"] == [0.0, -0.5, -1.0]
 
 
+def test_tactile_history_timestamps_are_current_to_past():
+    data_config = _config.DataConfig(
+        repack_transforms=_transforms.Group(
+            inputs=[
+                _transforms.RepackTransform(
+                    {
+                        "left_marker": "observation.tactile.left_marker",
+                        "right_marker": "observation.tactile.right_marker",
+                    }
+                )
+            ]
+        )
+    )
+    model_config = pi0_config.Pi0Config(
+        pi05=True,
+        use_tactile=True,
+        streaming=True,
+        streaming_attention_mode="tactile_attention_gate",
+        tactile_history_length=4,
+    )
+    delta_timestamps = {}
+    dataset_meta = SimpleNamespace(
+        fps=20,
+        features={
+            "observation.tactile.left_marker": {"dtype": "float32"},
+            "observation.tactile.right_marker": {"dtype": "float32"},
+        },
+    )
+
+    _data_loader._add_tactile_history_timestamps(  # noqa: SLF001
+        delta_timestamps, data_config, dataset_meta, model_config
+    )
+
+    expected = [-0.15, -0.1, -0.05, 0.0]
+    assert delta_timestamps["observation.tactile.left_marker"] == expected
+    assert delta_timestamps["observation.tactile.right_marker"] == expected
+
+
 def test_torch_data_loader():
     config = pi0_config.Pi0Config(action_dim=24, action_horizon=50, max_token_len=48)
     dataset = _data_loader.FakeDataset(config, 16)

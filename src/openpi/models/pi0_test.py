@@ -186,6 +186,94 @@ def test_streaming_attention_mode_controls_chunk_connections():
     assert jnp.all(model._mask_action_chunks(base, 0))  # noqa: SLF001
 
 
+def test_tactile_attention_gate_config_and_initialization():
+    with pytest.raises(ValueError, match="requires streaming=True"):
+        _pi0_config.Pi0Config(pi05=True, use_tactile=True, streaming_attention_mode="tactile_attention_gate")
+    with pytest.raises(ValueError, match="requires use_tactile=True"):
+        _pi0_config.Pi0Config(pi05=True, streaming=True, streaming_attention_mode="tactile_attention_gate")
+
+    config = _pi0_config.Pi0Config(
+        pi05=True,
+        use_tactile=True,
+        use_tactile_adarms=False,
+        streaming=True,
+        action_horizon=6,
+        streaming_chunk_size=2,
+        streaming_attention_mode="tactile_attention_gate",
+        tactile_history_length=3,
+        paligemma_variant="dummy",
+        action_expert_variant="dummy",
+    )
+    model = config.create(jax.random.key(0))
+    assert _action_ar_mask(6, 2, "tactile_attention_gate") == [True, False, False, False, False, False]
+    base_mask = jnp.ones((1, 6, 6), dtype=jnp.bool_)
+    assert jnp.array_equal(model._mask_action_chunks(base_mask, 0), base_mask)  # noqa: SLF001
+    observation = config.fake_obs()
+    log_gates = model._tactile_attention_log_gates(observation)  # noqa: SLF001
+    assert log_gates.shape == (1, 3)
+    assert jnp.allclose(log_gates, jnp.log(0.2))
+
+    gates = jnp.log(jnp.asarray([[0.2, 0.4, 0.8]], dtype=jnp.float32))
+    bias = model._make_action_attention_bias(  # noqa: SLF001
+        gates, query_length=6, key_length=6, action_query_start=0, action_key_start=0
+    )
+    assert jnp.allclose(bias[0, :2, :2], 0.0)
+    assert jnp.allclose(bias[0, :2, 2:], jnp.log(0.2))
+    assert jnp.allclose(bias[0, 2:4, :2], jnp.log(0.4))
+    assert jnp.allclose(bias[0, 2:4, 2:4], 0.0)
+    assert jnp.allclose(bias[0, 4:6, :4], jnp.log(0.8))
+    assert jnp.allclose(bias[0, 4:6, 4:6], 0.0)
+
+    loss = model.compute_loss(jax.random.key(1), observation, config.fake_act())
+    assert loss.shape == (1, config.action_horizon)
+    sampled = model.sample_actions(
+        jax.random.key(2),
+        observation,
+        num_steps=1,
+        noise=jnp.zeros((1, config.action_horizon, config.action_dim), dtype=jnp.float32),
+    )
+    assert sampled.shape == (1, config.action_horizon, config.action_dim)
+
+    prefix_cache = model.encode_prefix(observation)
+    prefixed_sample = model.sample_actions_from_prefix(
+        jax.random.key(3),
+        observation.state,
+        prefix_cache,
+        num_steps=1,
+        noise=jnp.zeros((1, config.action_horizon, config.action_dim), dtype=jnp.float32),
+        tactile_left_marker_history=observation.tactile_left_marker_history,
+        tactile_right_marker_history=observation.tactile_right_marker_history,
+    )
+    assert prefixed_sample.shape == (1, config.action_horizon, config.action_dim)
+
+
+def test_tactile_attention_gate_graphdef_is_stable_after_parameter_merge():
+    config = _pi0_config.Pi0Config(
+        pi05=True,
+        use_tactile=True,
+        streaming=True,
+        action_horizon=10,
+        streaming_chunk_size=5,
+        streaming_attention_mode="tactile_attention_gate",
+        paligemma_variant="dummy",
+        action_expert_variant="dummy",
+    )
+
+    def init(rng, partial_params=None):
+        model = config.create(rng)
+        if partial_params is not None:
+            graphdef, state = nnx.split(model)
+            state.replace_by_pure_dict(partial_params)
+            model = nnx.merge(graphdef, state)
+        return nnx.graphdef(model)
+
+    abstract_graphdef = nnx.eval_shape(init, jax.random.key(0))
+    initialized_model = config.create(jax.random.key(1))
+    merged_graphdef = init(jax.random.key(0), nnx.state(initialized_model).to_pure_dict())
+
+    assert abstract_graphdef == merged_graphdef
+
+
 def test_streaming_attention_mode_is_validated():
     with pytest.raises(ValueError, match="streaming_attention_mode"):
         _pi0_config.Pi0Config(streaming_attention_mode="invalid")
@@ -349,3 +437,28 @@ def test_checkpoint_loader_keeps_new_state_projection_initialized(tmp_path, monk
     assert np.all(result["action_in_proj"]["kernel"] == 1.0)
     assert np.all(result["state_proj"]["kernel"] == 7.0)
     assert np.all(result["marker_mlp_in"]["kernel"] == 8.0)
+
+
+def test_checkpoint_loader_keeps_tactile_gate_initialized(tmp_path, monkeypatch):
+    from openpi.models import model as _model
+    from openpi.training import weight_loaders
+
+    loaded = {"action_in_proj": {"kernel": np.ones((32, 1024), dtype=np.float32)}}
+    monkeypatch.setattr(_model, "restore_params", lambda *args, **kwargs: loaded)
+    monkeypatch.setattr(weight_loaders.download, "maybe_download", lambda path: tmp_path)
+
+    loader = weight_loaders.CheckpointWeightLoader("unused")
+    params = {
+        "action_in_proj": {"kernel": np.zeros((32, 1024), dtype=np.float32)},
+        "tactile_tcn_in": {"kernel": np.full((288, 256), 2.0, dtype=np.float32)},
+        "tactile_gate_out": {
+            "kernel": np.zeros((256, 1), dtype=np.float32),
+            "bias": np.full((1,), -1.3862944, dtype=np.float32),
+        },
+    }
+
+    result = loader.load(params)
+
+    assert np.all(result["action_in_proj"]["kernel"] == 1.0)
+    assert np.all(result["tactile_tcn_in"]["kernel"] == 2.0)
+    assert np.allclose(result["tactile_gate_out"]["bias"], -1.3862944)

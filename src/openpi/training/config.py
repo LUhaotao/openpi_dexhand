@@ -718,13 +718,30 @@ class TrainConfig:
         if self.resume and self.overwrite:
             raise ValueError("Cannot resume and overwrite at the same time.")
 
-def make_univtac_config(dataset_name: str, *, use_tactile: bool = False) -> TrainConfig:
-    dataset_dir = f"/public/node01/users/lvrui/datasets/lerobot/univtac_backup/{dataset_name}"
+def make_univtac_config(
+    dataset_name: str,
+    *,
+    use_tactile: bool = False,
+    streaming: bool = False,
+    streaming_attention_mode: Literal[
+        "mask", "causal", "bidirectional", "tactile_attention_gate"
+    ] = "bidirectional",
+    use_tactile_adarms: bool = True,
+    tactile_history_length: int = 10,
+) -> TrainConfig:
+    dataset_dir = f"/public/node01/users/lvrui/datasets/lerobot/univtac/{dataset_name}"
+    name = f"pi05_UniVTAC_{dataset_name}{'_tactile' if use_tactile else ''}"
+    if streaming:
+        name += f"_streaming_{streaming_attention_mode}"
     return TrainConfig(
-        name=f"pi05_UniVTAC_{dataset_name}{'_tactile' if use_tactile else ''}",
+        name=name,
         model=pi0_config.Pi0Config(
             pi05=True,
             use_tactile=use_tactile,
+            streaming=streaming,
+            streaming_attention_mode=streaming_attention_mode,
+            use_tactile_adarms=use_tactile_adarms,
+            tactile_history_length=tactile_history_length,
         ),
         data=LeRobotUniVTACDataConfig(
             repo_id=dataset_dir,
@@ -2219,6 +2236,13 @@ _CONFIGS = [
     make_univtac_config("lift_can", use_tactile=True),
     make_univtac_config("pull_out_key", use_tactile=True),
     make_univtac_config("put_bottle_in_shelf", use_tactile=True),
+    make_univtac_config(
+        "insert_HDMI",
+        use_tactile=True,
+        streaming=True,
+        streaming_attention_mode="tactile_attention_gate",
+        use_tactile_adarms=False,
+    ),
 
     TrainConfig(
         # This config is for fine-tuning pi05-DROID on a custom (smaller) DROID dataset.

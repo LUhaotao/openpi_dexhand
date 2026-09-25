@@ -74,6 +74,8 @@ def create_trained_policy(
     # Check if this is a PyTorch model by looking for model.safetensors
     weight_path = os.path.join(checkpoint_dir, "model.safetensors")
     is_pytorch = os.path.exists(weight_path)
+    if is_pytorch and getattr(train_config.model, "streaming_attention_mode", None) == "tactile_attention_gate":
+        raise ValueError("tactile_attention_gate is implemented only for JAX checkpoints")
 
     logging.info("Loading model...")
     if is_pytorch:

@@ -46,9 +46,11 @@ class CheckpointWeightLoader(WeightLoader):
     """
 
     params_path: str
-    # Keep newly introduced projection parameters at their model initialization
-    # when loading older checkpoints that do not contain them.
-    missing_regex: str = r".*lora.*|.*state_proj.*|.*marker_.*"
+    # Keep newly introduced parameters at their model initialization when loading
+    # older checkpoints that do not contain them. This includes the JAX-only
+    # tactile attention gate (its output layer is intentionally initialized with
+    # zero weights and logit(0.2) bias).
+    missing_regex: str = r".*lora.*|.*state_proj.*|.*marker_.*|.*tactile_.*"
 
     def load(self, params: at.Params) -> at.Params:
         # We are loading np.ndarray and relying on the training code to properly convert and shard the params.

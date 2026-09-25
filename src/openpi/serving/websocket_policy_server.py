@@ -3,6 +3,7 @@ import http
 import logging
 import time
 import traceback
+import uuid
 
 from openpi_client import base_policy as _base_policy
 from openpi_client import msgpack_numpy
@@ -51,38 +52,48 @@ class WebsocketPolicyServer:
 
         await websocket.send(packer.pack(self._metadata))
 
+        session_id = uuid.uuid4().hex
         prev_total_time = None
-        while True:
-            try:
-                start_time = time.monotonic()
-                obs = msgpack_numpy.unpackb(await websocket.recv())
+        try:
+            while True:
+                try:
+                    start_time = time.monotonic()
+                    obs = msgpack_numpy.unpackb(await websocket.recv())
 
-                infer_time = time.monotonic()
-                # Keep synchronous model work off the asyncio event loop so a
-                # background cache refresh cannot stall websocket scheduling.
-                action = await asyncio.to_thread(self._policy.infer, obs)
-                infer_time = time.monotonic() - infer_time
+                    infer_time = time.monotonic()
+                    # Keep synchronous model work off the asyncio event loop so a
+                    # background cache refresh cannot stall websocket scheduling.
+                    infer_with_session = getattr(self._policy, "infer_with_session", None)
+                    if callable(infer_with_session) and getattr(self._policy, "tactile_history_enabled", False):
+                        action = await asyncio.to_thread(infer_with_session, obs, session_id=session_id)
+                    else:
+                        action = await asyncio.to_thread(self._policy.infer, obs)
+                    infer_time = time.monotonic() - infer_time
 
-                action["server_timing"] = {
-                    "infer_ms": infer_time * 1000,
-                }
-                if prev_total_time is not None:
-                    # We can only record the last total time since we also want to include the send time.
-                    action["server_timing"]["prev_total_ms"] = prev_total_time * 1000
+                    action["server_timing"] = {
+                        "infer_ms": infer_time * 1000,
+                    }
+                    if prev_total_time is not None:
+                        # We can only record the last total time since we also want to include the send time.
+                        action["server_timing"]["prev_total_ms"] = prev_total_time * 1000
 
-                await websocket.send(packer.pack(action))
-                prev_total_time = time.monotonic() - start_time
+                    await websocket.send(packer.pack(action))
+                    prev_total_time = time.monotonic() - start_time
 
-            except websockets.ConnectionClosed:
-                logger.info(f"Connection from {websocket.remote_address} closed")
-                break
-            except Exception:
-                await websocket.send(traceback.format_exc())
-                await websocket.close(
-                    code=websockets.frames.CloseCode.INTERNAL_ERROR,
-                    reason="Internal server error. Traceback included in previous frame.",
-                )
-                raise
+                except websockets.ConnectionClosed:
+                    logger.info(f"Connection from {websocket.remote_address} closed")
+                    break
+                except Exception:
+                    await websocket.send(traceback.format_exc())
+                    await websocket.close(
+                        code=websockets.frames.CloseCode.INTERNAL_ERROR,
+                        reason="Internal server error. Traceback included in previous frame.",
+                    )
+                    raise
+        finally:
+            reset_session = getattr(self._policy, "reset_tactile_history", None)
+            if callable(reset_session) and getattr(self._policy, "tactile_history_enabled", False):
+                reset_session(session_id)
 
 
 def _health_check(connection: _server.ServerConnection, request: _server.Request) -> _server.Response | None:

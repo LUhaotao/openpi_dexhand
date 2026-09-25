@@ -44,7 +44,7 @@ class Pi0Config(_model.BaseModelConfig):
     # Optional streaming-style training with a per-chunk noise schedule.
     streaming: bool = False
     streaming_chunk_size: int = 5
-    streaming_attention_mode: Literal["mask", "causal", "bidirectional"] = "bidirectional"
+    streaming_attention_mode: Literal["mask", "causal", "bidirectional", "tactile_attention_gate"] = "bidirectional"
     streaming_constant_weight: float = 0.2
     streaming_chunk_wise_weight: float = 0.8
     streaming_token_wise_weight: float = 0.0
@@ -52,6 +52,8 @@ class Pi0Config(_model.BaseModelConfig):
     # streaming_chunk_size. A value of 0 disables the augmentation.
     observation_delay_max_chunks: int = 0
     use_tactile: bool = False
+    use_tactile_adarms: bool = True
+    tactile_history_length: int = 10
     # This config option is not used directly by the model, but it is read by the ModelTransformFactory.
     discrete_state_input: bool = None  # type: ignore
 
@@ -70,10 +72,24 @@ class Pi0Config(_model.BaseModelConfig):
             raise ValueError("action_horizon must be divisible by streaming_chunk_size")
         if self.observation_delay_max_chunks < 0:
             raise ValueError("observation_delay_max_chunks must be non-negative")
-        if self.streaming_attention_mode not in ("mask", "causal", "bidirectional"):
-            raise ValueError("streaming_attention_mode must be one of: mask, causal, bidirectional")
+        if self.streaming_attention_mode not in (
+            "mask",
+            "causal",
+            "bidirectional",
+            "tactile_attention_gate",
+        ):
+            raise ValueError(
+                "streaming_attention_mode must be one of: mask, causal, bidirectional, tactile_attention_gate"
+            )
         if self.use_tactile and not self.pi05:
             raise ValueError("use_tactile requires pi05=True")
+        if self.tactile_history_length < 1:
+            raise ValueError("tactile_history_length must be positive")
+        if self.streaming_attention_mode == "tactile_attention_gate":
+            if not self.streaming:
+                raise ValueError("tactile_attention_gate requires streaming=True")
+            if not self.use_tactile:
+                raise ValueError("tactile_attention_gate requires use_tactile=True")
         if any(
             weight < 0
             for weight in (
@@ -116,6 +132,9 @@ class Pi0Config(_model.BaseModelConfig):
         image_spec = jax.ShapeDtypeStruct([batch_size, *_model.IMAGE_RESOLUTION, 3], jnp.float32)
         image_mask_spec = jax.ShapeDtypeStruct([batch_size], jnp.bool_)
         marker_spec = jax.ShapeDtypeStruct([batch_size, *TACTILE_MARKER_SHAPE], jnp.float32)
+        marker_history_spec = jax.ShapeDtypeStruct(
+            [batch_size, self.tactile_history_length, *TACTILE_MARKER_SHAPE], jnp.float32
+        )
 
         with at.disable_typechecking():
             observation_spec = _model.Observation(
@@ -132,6 +151,12 @@ class Pi0Config(_model.BaseModelConfig):
                 state=jax.ShapeDtypeStruct([batch_size, self.action_dim], jnp.float32),
                 tactile_left_marker=marker_spec if self.use_tactile else None,
                 tactile_right_marker=marker_spec if self.use_tactile else None,
+                tactile_left_marker_history=(
+                    marker_history_spec if self.streaming_attention_mode == "tactile_attention_gate" else None
+                ),
+                tactile_right_marker_history=(
+                    marker_history_spec if self.streaming_attention_mode == "tactile_attention_gate" else None
+                ),
                 tokenized_prompt=jax.ShapeDtypeStruct([batch_size, self.max_token_len], jnp.int32),
                 tokenized_prompt_mask=jax.ShapeDtypeStruct([batch_size, self.max_token_len], bool),
             )
@@ -188,6 +213,8 @@ def save_snapshot(directory: str | pathlib.Path, config: Pi0Config) -> pathlib.P
         snapshot.pop("max_token_len", None)
     if config.discrete_state_input == config.pi05:
         snapshot.pop("discrete_state_input", None)
+    if config.streaming:
+        snapshot["streaming_chunk_size"] = config.streaming_chunk_size
     path.write_text(json.dumps(snapshot, indent=2, sort_keys=True) + "\n")
     return path
 
