@@ -54,7 +54,7 @@ def make_attn_mask(input_mask, mask_ar):
 
 def _action_ar_mask(action_horizon: int, chunk_size: int, mode: str = "causal") -> list[bool]:
     """Make action-block boundaries for the selected inter-chunk attention mode."""
-    if mode in ("mask", "bidirectional", "tactile_attention_gate"):
+    if mode in ("mask", "bidirectional", "tactile_attention_gate", "learnable_gate"):
         return [index == 0 for index in range(action_horizon)]
     return [index % chunk_size == 0 for index in range(action_horizon)]
 
@@ -181,6 +181,9 @@ class Pi0(_model.BaseModel):
             self.state_proj = nnx.Linear(config.action_dim, action_expert_config.width, rngs=rngs)
             self.action_time_mlp_in = nnx.Linear(2 * action_expert_config.width, action_expert_config.width, rngs=rngs)
             self.action_time_mlp_out = nnx.Linear(action_expert_config.width, action_expert_config.width, rngs=rngs)
+        if config.streaming_attention_mode == "learnable_gate":
+            # Match the tactile gate's initial cross-chunk weight of 0.2.
+            self.learnable_gate_logit = nnx.Param(jnp.asarray(_TACTILE_GATE_BIAS, dtype=jnp.float32))
         self.action_out_proj = nnx.Linear(action_expert_config.width, config.action_dim, rngs=rngs)
 
         # This attribute gets automatically set by model.train() and model.eval().
@@ -243,6 +246,18 @@ class Pi0(_model.BaseModel):
         return self._tactile_attention_log_gates_from_history(
             obs.tactile_left_marker_history, obs.tactile_right_marker_history
         )
+
+    def _learnable_attention_log_gates(self, batch_size: int) -> at.Float[at.Array, "b k"] | None:
+        if self.streaming_attention_mode != "learnable_gate":
+            return None
+        chunk_count = self.action_horizon // self.streaming_chunk_size
+        log_gate = jax.nn.log_sigmoid(self.learnable_gate_logit.value)
+        return jnp.broadcast_to(log_gate, (batch_size, chunk_count))
+
+    def _attention_log_gates(self, obs: _model.Observation) -> at.Float[at.Array, "b k"] | None:
+        if self.streaming_attention_mode == "tactile_attention_gate":
+            return self._tactile_attention_log_gates(obs)
+        return self._learnable_attention_log_gates(obs.state.shape[0])
 
     def _tactile_attention_log_gates_from_history(
         self,
@@ -387,7 +402,7 @@ class Pi0(_model.BaseModel):
             regime_rng,
         ) = jax.random.split(rng, 6)
         observation = _model.preprocess_observation(preprocess_rng, observation, train=train)
-        tactile_log_gates = self._tactile_attention_log_gates(observation)
+        attention_log_gates = self._attention_log_gates(observation)
 
         batch_shape = actions.shape[:-2]
         noise = jax.random.normal(noise_rng, actions.shape)
@@ -436,7 +451,7 @@ class Pi0(_model.BaseModel):
         )
         action_start = prefix_tokens.shape[1] + suffix_tokens.shape[1] - self.action_horizon
         attn_bias = self._make_action_attention_bias(
-            tactile_log_gates,
+            attention_log_gates,
             query_length=attn_mask.shape[1],
             key_length=attn_mask.shape[2],
             action_query_start=action_start,
@@ -507,7 +522,7 @@ class Pi0(_model.BaseModel):
 
         # first fill KV cache with a forward pass of the prefix
         tactile_condition = self._marker_condition(observation)
-        tactile_log_gates = self._tactile_attention_log_gates(observation)
+        attention_log_gates = self._attention_log_gates(observation)
         prefix_tokens, prefix_mask, prefix_ar_mask = self.embed_prefix(observation)
         prefix_attn_mask = make_attn_mask(prefix_mask, prefix_ar_mask)
         positions = jnp.cumsum(prefix_mask, axis=1) - 1
@@ -532,7 +547,7 @@ class Pi0(_model.BaseModel):
             full_attn_mask = jnp.concatenate([prefix_attn_mask, suffix_attn_mask], axis=-1)
             action_query_start = suffix_tokens.shape[1] - self.action_horizon
             full_attn_bias = self._make_action_attention_bias(
-                tactile_log_gates,
+                attention_log_gates,
                 query_length=full_attn_mask.shape[1],
                 key_length=full_attn_mask.shape[2],
                 action_query_start=action_query_start,
@@ -592,12 +607,15 @@ class Pi0(_model.BaseModel):
         """Run flow matching using a prefix KV cache produced by ``encode_prefix``."""
         if getattr(self, "use_tactile_adarms", False) and tactile_condition is None:
             raise ValueError("use_tactile=True requires tactile_condition for prefix sampling")
-        tactile_log_gates = (
-            self._tactile_attention_log_gates_from_history(tactile_left_marker_history, tactile_right_marker_history)
-            if self.streaming_attention_mode == "tactile_attention_gate"
-            else None
-        )
         batch_size = state.shape[0]
+        if self.streaming_attention_mode == "tactile_attention_gate":
+            attention_log_gates = self._tactile_attention_log_gates_from_history(
+                tactile_left_marker_history, tactile_right_marker_history
+            )
+        elif self.streaming_attention_mode == "learnable_gate":
+            attention_log_gates = self._learnable_attention_log_gates(batch_size)
+        else:
+            attention_log_gates = None
         if noise is None:
             noise = jax.random.normal(rng, (batch_size, self.action_horizon, self.action_dim))
 
@@ -611,7 +629,7 @@ class Pi0(_model.BaseModel):
                 x_t,
                 jnp.broadcast_to(time, batch_size),
                 tactile_condition,
-                tactile_log_gates,
+                attention_log_gates,
             )
             return x_t + dt * v_t, time + dt
 
@@ -641,11 +659,15 @@ class Pi0(_model.BaseModel):
             raise ValueError("Streaming inference requires a model trained with streaming=True")
         if getattr(self, "use_tactile_adarms", False) and tactile_condition is None:
             raise ValueError("use_tactile=True requires tactile_condition for streaming")
-        tactile_log_gates = (
-            self._tactile_attention_log_gates_from_history(tactile_left_marker_history, tactile_right_marker_history)
-            if getattr(self, "streaming_attention_mode", None) == "tactile_attention_gate"
-            else None
-        )
+        attention_mode = getattr(self, "streaming_attention_mode", None)
+        if attention_mode == "tactile_attention_gate":
+            attention_log_gates = self._tactile_attention_log_gates_from_history(
+                tactile_left_marker_history, tactile_right_marker_history
+            )
+        elif attention_mode == "learnable_gate":
+            attention_log_gates = self._learnable_attention_log_gates(state.shape[0])
+        else:
+            attention_log_gates = None
 
         timestep = self.streaming_timestep(action_window.dtype)
         chunk_size = self.streaming_chunk_size
@@ -654,7 +676,7 @@ class Pi0(_model.BaseModel):
             step_rng, action_buffer = carry
             step_rng, noise_rng = jax.random.split(step_rng)
             actions = action_buffer[:, chunk_size:]
-            if tactile_condition is None and tactile_log_gates is None:
+            if tactile_condition is None and attention_log_gates is None:
                 velocity = self._velocity_from_prefix(state, prefix_cache, actions, timestep[None, :])
             else:
                 velocity = self._velocity_from_prefix(
@@ -663,7 +685,7 @@ class Pi0(_model.BaseModel):
                     actions,
                     timestep[None, :],
                     tactile_condition,
-                    tactile_log_gates,
+                    attention_log_gates,
                 )
             fresh_noise = jax.random.normal(
                 noise_rng,
@@ -682,7 +704,7 @@ class Pi0(_model.BaseModel):
         noisy_actions: _model.Actions,
         timestep: at.Float[at.Array, "b ..."],
         tactile_condition: at.Float[at.Array, "b emb"] | None = None,
-        tactile_log_gates: at.Float[at.Array, "b k"] | None = None,
+        attention_log_gates: at.Float[at.Array, "b k"] | None = None,
     ) -> _model.Actions:
         """Predict flow velocity for suffix tokens against an encoded prefix."""
         kv_cache = jax.tree.map(
@@ -699,7 +721,7 @@ class Pi0(_model.BaseModel):
         full_attn_mask = jnp.concatenate([prefix_attn_mask, suffix_attn_mask], axis=-1)
         action_query_start = suffix_tokens.shape[1] - self.action_horizon
         full_attn_bias = self._make_action_attention_bias(
-            tactile_log_gates,
+            attention_log_gates,
             query_length=full_attn_mask.shape[1],
             key_length=full_attn_mask.shape[2],
             action_query_start=action_query_start,

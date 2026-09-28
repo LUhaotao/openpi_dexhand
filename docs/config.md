@@ -23,3 +23,5 @@
 目前我们的config主要建立在JAX+pi05线路上，其他线路没有改动
 
 `streaming_attention_mode="tactile_attention_gate"` 是额外的JAX streaming注意力策略：chunk内保持双向注意力，跨chunk边按query chunk的触觉gate加入`log(gate)` bias。训练时从LeRobot采样marker历史；推理client仍可逐帧发送，server按session缓存历史。该模式要求`streaming=true`和`use_tactile=true`。
+
+`streaming_attention_mode="learnable_gate"` 使用单个全局可学习gate约束所有chunk之间的attention，不读取触觉输入；其初始gate与`tactile_attention_gate`相同，为0.2。该模式要求`streaming=true`。

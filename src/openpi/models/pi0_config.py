@@ -46,7 +46,9 @@ class Pi0Config(_model.BaseModelConfig):
     # Optional streaming-style training with a per-chunk noise schedule.
     streaming: bool = False
     streaming_chunk_size: int = 5
-    streaming_attention_mode: Literal["mask", "causal", "bidirectional", "tactile_attention_gate"] = "bidirectional"
+    streaming_attention_mode: Literal[
+        "mask", "causal", "bidirectional", "tactile_attention_gate", "learnable_gate"
+    ] = "bidirectional"
     streaming_constant_weight: float = 0.2
     streaming_chunk_wise_weight: float = 0.8
     streaming_token_wise_weight: float = 0.0
@@ -83,9 +85,11 @@ class Pi0Config(_model.BaseModelConfig):
             "causal",
             "bidirectional",
             "tactile_attention_gate",
+            "learnable_gate",
         ):
             raise ValueError(
-                "streaming_attention_mode must be one of: mask, causal, bidirectional, tactile_attention_gate"
+                "streaming_attention_mode must be one of: mask, causal, bidirectional, "
+                "tactile_attention_gate, learnable_gate"
             )
         if self.use_tactile and not self.pi05:
             raise ValueError("use_tactile requires pi05=True")
@@ -93,11 +97,10 @@ class Pi0Config(_model.BaseModelConfig):
             raise ValueError("use_tactile_adarms requires use_tactile=True")
         if self.tactile_history_length < 1:
             raise ValueError("tactile_history_length must be positive")
-        if self.streaming_attention_mode == "tactile_attention_gate":
-            if not self.streaming:
-                raise ValueError("tactile_attention_gate requires streaming=True")
-            if not self.use_tactile:
-                raise ValueError("tactile_attention_gate requires use_tactile=True")
+        if self.streaming_attention_mode in ("tactile_attention_gate", "learnable_gate") and not self.streaming:
+            raise ValueError(f"{self.streaming_attention_mode} requires streaming=True")
+        if self.streaming_attention_mode == "tactile_attention_gate" and not self.use_tactile:
+            raise ValueError("tactile_attention_gate requires use_tactile=True")
         if any(
             weight < 0
             for weight in (

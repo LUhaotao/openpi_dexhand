@@ -280,6 +280,50 @@ def test_tactile_attention_gate_graphdef_is_stable_after_parameter_merge():
     assert abstract_graphdef == merged_graphdef
 
 
+def test_learnable_gate_is_global_and_matches_tactile_initialization():
+    with pytest.raises(ValueError, match="learnable_gate requires streaming=True"):
+        _pi0_config.Pi0Config(pi05=True, streaming_attention_mode="learnable_gate")
+
+    config = _pi0_config.Pi0Config(
+        pi05=True,
+        streaming=True,
+        action_horizon=6,
+        streaming_chunk_size=2,
+        streaming_attention_mode="learnable_gate",
+        paligemma_variant="dummy",
+        action_expert_variant="dummy",
+    )
+    model = config.create(jax.random.key(4))
+    observation = config.fake_obs()
+
+    assert _action_ar_mask(6, 2, "learnable_gate") == [True, False, False, False, False, False]
+    log_gates = model._attention_log_gates(observation)  # noqa: SLF001
+    assert log_gates.shape == (1, 3)
+    assert jnp.allclose(log_gates, jnp.log(0.2))
+    assert jnp.allclose(model.learnable_gate_logit.value, -1.38629436112)
+
+    gates = jnp.broadcast_to(jnp.log(jnp.asarray(0.2, dtype=jnp.float32)), (1, 3))
+    bias = model._make_action_attention_bias(  # noqa: SLF001
+        gates, query_length=6, key_length=6, action_query_start=0, action_key_start=0
+    )
+    expected = jnp.full((6, 6), jnp.log(0.2), dtype=jnp.float32)
+    expected = expected.at[jnp.diag_indices(6)].set(0.0)
+    expected = expected.at[:2, :2].set(0.0)
+    expected = expected.at[2:4, 2:4].set(0.0)
+    expected = expected.at[4:6, 4:6].set(0.0)
+    assert jnp.allclose(bias[0], expected)
+
+    loss = model.compute_loss(jax.random.key(5), observation, config.fake_act())
+    assert loss.shape == (1, config.action_horizon)
+    sampled = model.sample_actions(
+        jax.random.key(6),
+        observation,
+        num_steps=1,
+        noise=jnp.zeros((1, config.action_horizon, config.action_dim), dtype=jnp.float32),
+    )
+    assert sampled.shape == (1, config.action_horizon, config.action_dim)
+
+
 def test_streaming_attention_mode_is_validated():
     with pytest.raises(ValueError, match="streaming_attention_mode"):
         _pi0_config.Pi0Config(streaming_attention_mode="invalid")

@@ -724,7 +724,7 @@ def make_univtac_config(
     use_tactile: bool = False,
     streaming: bool = False,
     streaming_attention_mode: Literal[
-        "mask", "causal", "bidirectional", "tactile_attention_gate"
+        "mask", "causal", "bidirectional", "tactile_attention_gate", "learnable_gate"
     ] = "bidirectional",
     use_tactile_adarms: bool = False,
     tactile_history_length: int = 10,
@@ -2242,6 +2242,11 @@ _CONFIGS = [
         streaming=True,
         streaming_attention_mode="tactile_attention_gate",
         use_tactile_adarms=False,
+    ),
+    make_univtac_config(
+        "insert_HDMI",
+        streaming=True,
+        streaming_attention_mode="learnable_gate",
     ),
 
     TrainConfig(
