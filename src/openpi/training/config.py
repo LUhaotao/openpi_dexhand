@@ -726,7 +726,7 @@ def make_univtac_config(
     streaming_attention_mode: Literal[
         "mask", "causal", "bidirectional", "tactile_attention_gate"
     ] = "bidirectional",
-    use_tactile_adarms: bool = True,
+    use_tactile_adarms: bool = False,
     tactile_history_length: int = 10,
 ) -> TrainConfig:
     dataset_dir = f"/public/node01/users/lvrui/datasets/lerobot/univtac/{dataset_name}"
@@ -758,7 +758,7 @@ def make_univtac_config(
         log_interval=100,
         save_interval=5000,
         keep_period=5000,
-        num_workers=48,
+        num_workers=32,
     )
 
 

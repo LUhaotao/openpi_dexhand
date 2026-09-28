@@ -47,6 +47,25 @@ def init_logging():
     logger.handlers[0].setFormatter(formatter)
 
 
+def _gradient_accumulation_steps(config: _config.TrainConfig) -> int:
+    """Return the JAX Pi05 gradient accumulation count."""
+    return int(getattr(config.model, "gradient_accumulation_steps", 1))
+
+
+def _stack_microbatches(batches, sharding: jax.sharding.Sharding):
+    """Stack batches on a leading accumulation axis and apply the matching sharding."""
+    return jax.tree.map(
+        lambda *arrays: jax.device_put(jnp.stack(arrays, axis=0), sharding),
+        *batches,
+    )
+
+
+def _next_train_batch(data_iter, accumulation_steps: int, sharding: jax.sharding.Sharding):
+    if accumulation_steps == 1:
+        return next(data_iter)
+    return _stack_microbatches([next(data_iter) for _ in range(accumulation_steps)], sharding)
+
+
 def init_wandb(config: _config.TrainConfig, *, resuming: bool, log_code: bool = False, enabled: bool = True):
     if not enabled:
         wandb.init(mode="disabled")
@@ -155,9 +174,42 @@ def train_step(
 
     # Filter out frozen params.
     diff_state = nnx.DiffState(0, config.trainable_filter)
-    loss, grads = nnx.value_and_grad(loss_fn, argnums=diff_state)(model, train_rng, observation, actions)
-
     params = state.params.filter(config.trainable_filter)
+    value_and_grad_fn = nnx.value_and_grad(loss_fn, argnums=diff_state)
+    accumulation_steps = _gradient_accumulation_steps(config)
+    if accumulation_steps == 1:
+        loss, grads = value_and_grad_fn(model, train_rng, observation, actions)
+    else:
+        # The leading batch dimension is the accumulation axis. Each scan iteration sees one
+        # regular batch, so activations from previous microbatches can be released before the
+        # next forward/backward pass.
+        grad_accumulator = jax.tree.map(jnp.zeros_like, params)
+        microbatch_rngs = jax.random.split(train_rng, accumulation_steps)
+
+        def accumulate_gradients(carry, microbatch):
+            accumulated_grads, accumulated_loss = carry
+            micro_observation, micro_actions, micro_rng = microbatch
+            micro_loss, micro_grads = value_and_grad_fn(
+                model,
+                micro_rng,
+                micro_observation,
+                micro_actions,
+            )
+            accumulated_grads = jax.tree.map(
+                lambda accumulated, gradient: accumulated + gradient,
+                accumulated_grads,
+                micro_grads,
+            )
+            return (accumulated_grads, accumulated_loss + micro_loss), None
+
+        (grads, loss), _ = jax.lax.scan(
+            accumulate_gradients,
+            (grad_accumulator, jnp.zeros((), dtype=jnp.float32)),
+            (observation, actions, microbatch_rngs),
+        )
+        grads = jax.tree.map(lambda gradient: gradient / accumulation_steps, grads)
+        loss = loss / accumulation_steps
+
     updates, new_opt_state = state.tx.update(grads, state.opt_state, params)
     new_params = optax.apply_updates(params, updates)
 
@@ -195,6 +247,7 @@ def main(config: _config.TrainConfig):
     init_logging()
     logging.info(f"Running on: {platform.node()}")
 
+    accumulation_steps = _gradient_accumulation_steps(config)
     if config.batch_size % jax.device_count() != 0:
         raise ValueError(
             f"Batch size {config.batch_size} must be divisible by the number of devices {jax.device_count()}."
@@ -207,6 +260,11 @@ def main(config: _config.TrainConfig):
 
     mesh = sharding.make_mesh(config.fsdp_devices)
     data_sharding = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec(sharding.DATA_AXIS))
+    train_data_sharding = data_sharding
+    if accumulation_steps > 1:
+        train_data_sharding = jax.sharding.NamedSharding(
+            mesh, jax.sharding.PartitionSpec(None, sharding.DATA_AXIS)
+        )
     replicated_sharding = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec())
 
     checkpoint_manager, resuming = _checkpoints.initialize_checkpoint_dir(
@@ -223,13 +281,14 @@ def main(config: _config.TrainConfig):
         shuffle=True,
     )
     data_iter = iter(data_loader)
-    batch = next(data_iter)
+    batch = _next_train_batch(data_iter, accumulation_steps, train_data_sharding)
     logging.info(f"Initialized data loader:\n{training_utils.array_tree_to_info(batch)}")
 
     # Log images from first batch to sanity check.
+    first_batch = batch if accumulation_steps == 1 else jax.tree.map(lambda value: value[0], batch)
     images_to_log = [
-        wandb.Image(np.concatenate([np.array(img[i]) for img in batch[0].images.values()], axis=1))
-        for i in range(min(5, len(next(iter(batch[0].images.values())))))
+        wandb.Image(np.concatenate([np.array(img[i]) for img in first_batch[0].images.values()], axis=1))
+        for i in range(min(5, len(next(iter(first_batch[0].images.values())))))
     ]
     wandb.log({"camera_views": images_to_log}, step=0)
 
@@ -242,7 +301,7 @@ def main(config: _config.TrainConfig):
 
     ptrain_step = jax.jit(
         functools.partial(train_step, config),
-        in_shardings=(replicated_sharding, train_state_sharding, data_sharding),
+        in_shardings=(replicated_sharding, train_state_sharding, train_data_sharding),
         out_shardings=(train_state_sharding, replicated_sharding),
         donate_argnums=(1,),
     )
@@ -267,7 +326,7 @@ def main(config: _config.TrainConfig):
             pbar.write(f"Step {step}: {info_str}")
             wandb.log(reduced_info, step=step)
             infos = []
-        batch = next(data_iter)
+        batch = _next_train_batch(data_iter, accumulation_steps, train_data_sharding)
 
         if (step % config.save_interval == 0 and step > start_step) or step == config.num_train_steps - 1:
             _checkpoints.save_state(checkpoint_manager, train_state, data_loader, step, config.model)

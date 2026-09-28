@@ -104,6 +104,12 @@ def test_streaming_token_wise_weight_defaults_to_zero():
     assert _pi0_config.Pi0Config().streaming is False
     assert _pi0_config.Pi0Config().streaming_attention_mode == "bidirectional"
     assert _pi0_config.Pi0Config().use_tactile is False
+    assert _pi0_config.Pi0Config().use_tactile_adarms is False
+
+
+def test_tactile_adarms_requires_tactile():
+    with pytest.raises(ValueError, match="requires use_tactile=True"):
+        _pi0_config.Pi0Config(pi05=True, use_tactile_adarms=True)
 
 
 def test_pi0_config_snapshot_round_trip(tmp_path):
@@ -385,6 +391,7 @@ def test_pi05_tactile_marker_modulates_adarms_condition():
     config = _pi0_config.Pi0Config(
         pi05=True,
         use_tactile=True,
+        use_tactile_adarms=True,
         paligemma_variant="dummy",
         action_expert_variant="dummy",
         action_horizon=3,

@@ -4,6 +4,7 @@
 ```bash
 ## 模型
 "pi05": false # 以下配置pi05启动时才生效
+"gradient_accumulation_steps": 1 # JAX pi05训练中每次参数更新使用的microbatch数量
 "discrete_state_input": true # 默认使用离散state，可以使用false变成将状态通过mlp进入fm
 ## streaming
 "streaming": false # 以下配置streaming启动时才生效
@@ -14,7 +15,7 @@
 "streaming_token_wise_weight": 0.0 # 每一个token使用不同的timestep
 "streaming_attention_mode": "bidirectional" # 所有token使用双向注意力（还可以选择mask和casual，chunk之间隔断注意力，chunk之间使用因果注意力）
 "tactile_history_length": 10 # tactile_attention_gate使用的当前及历史marker帧数
-"use_tactile_adarms": true # 与attention gate独立；可单独启用或组合使用
+"use_tactile_adarms": false # 触觉注入adaRMS；需要同时启用use_tactile
 ## tactile
 "use_tactile": false # 以下配置tactile启用时才生效
 ```

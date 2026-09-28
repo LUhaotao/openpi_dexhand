@@ -41,6 +41,8 @@ class Pi0Config(_model.BaseModelConfig):
     # - the state input is part of the discrete language tokens rather than a continuous input that is part of the suffix
     # - the action expert uses adaRMSNorm to inject the flow matching timestep
     pi05: bool = False
+    # JAX Pi05 training only: number of microbatches used for one optimizer update.
+    gradient_accumulation_steps: int = 1
     # Optional streaming-style training with a per-chunk noise schedule.
     streaming: bool = False
     streaming_chunk_size: int = 5
@@ -52,7 +54,7 @@ class Pi0Config(_model.BaseModelConfig):
     # streaming_chunk_size. A value of 0 disables the augmentation.
     observation_delay_max_chunks: int = 0
     use_tactile: bool = False
-    use_tactile_adarms: bool = True
+    use_tactile_adarms: bool = False
     tactile_history_length: int = 10
     # This config option is not used directly by the model, but it is read by the ModelTransformFactory.
     discrete_state_input: bool = None  # type: ignore
@@ -64,6 +66,10 @@ class Pi0Config(_model.BaseModelConfig):
             object.__setattr__(self, "max_token_len", 200 if self.pi05 else 48)
         if self.discrete_state_input is None:
             object.__setattr__(self, "discrete_state_input", self.pi05)
+        if self.gradient_accumulation_steps < 1:
+            raise ValueError("gradient_accumulation_steps must be positive")
+        if not self.pi05 and self.gradient_accumulation_steps != 1:
+            raise ValueError("gradient_accumulation_steps > 1 is only supported for pi05")
         if self.streaming_chunk_size < 1:
             raise ValueError("streaming_chunk_size must be positive")
         if self.streaming_chunk_size > self.action_horizon:
@@ -83,6 +89,8 @@ class Pi0Config(_model.BaseModelConfig):
             )
         if self.use_tactile and not self.pi05:
             raise ValueError("use_tactile requires pi05=True")
+        if self.use_tactile_adarms and not self.use_tactile:
+            raise ValueError("use_tactile_adarms requires use_tactile=True")
         if self.tactile_history_length < 1:
             raise ValueError("tactile_history_length must be positive")
         if self.streaming_attention_mode == "tactile_attention_gate":
