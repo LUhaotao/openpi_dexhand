@@ -59,6 +59,23 @@ class CheckpointWeightLoader(WeightLoader):
 
 
 @dataclasses.dataclass(frozen=True)
+class LenientCheckpointWeightLoader(WeightLoader):
+    """Load compatible checkpoint leaves and keep random init on shape changes."""
+
+    params_path: str
+    missing_regex: str = r".*lora.*|.*state_proj.*|.*marker_.*|.*tactile_.*|.*learnable_gate.*"
+
+    def load(self, params: at.Params) -> at.Params:
+        loaded_params = _model.restore_params(download.maybe_download(self.params_path), restore_type=np.ndarray)
+        return _merge_params(
+            loaded_params,
+            params,
+            missing_regex=self.missing_regex,
+            skip_shape_mismatch=True,
+        )
+
+
+@dataclasses.dataclass(frozen=True)
 class PaliGemmaWeightLoader(WeightLoader):
     """Loads weights from the official PaliGemma checkpoint.
 
@@ -77,7 +94,13 @@ class PaliGemmaWeightLoader(WeightLoader):
         return _merge_params(loaded_params, params, missing_regex=".*")
 
 
-def _merge_params(loaded_params: at.Params, params: at.Params, *, missing_regex: str) -> at.Params:
+def _merge_params(
+    loaded_params: at.Params,
+    params: at.Params,
+    *,
+    missing_regex: str,
+    skip_shape_mismatch: bool = False,
+) -> at.Params:
     """Merges the loaded parameters with the reference parameters.
 
     Args:
@@ -93,8 +116,12 @@ def _merge_params(loaded_params: at.Params, params: at.Params, *, missing_regex:
 
     # First, take all weights that are a subset of the reference weights.
     result = {}
+    skipped_shape = []
     for k, v in flat_loaded.items():
         if k in flat_ref:
+            if skip_shape_mismatch and tuple(v.shape) != tuple(flat_ref[k].shape):
+                skipped_shape.append(k)
+                continue
             result[k] = v.astype(flat_ref[k].dtype) if v.dtype != flat_ref[k].dtype else v
 
     flat_loaded.clear()
@@ -104,5 +131,8 @@ def _merge_params(loaded_params: at.Params, params: at.Params, *, missing_regex:
     for k in {k for k in flat_ref if pattern.fullmatch(k)}:
         if k not in result:
             result[k] = flat_ref[k]
+
+    for k in skipped_shape:
+        result[k] = flat_ref[k]
 
     return flax.traverse_util.unflatten_dict(result, sep="/")

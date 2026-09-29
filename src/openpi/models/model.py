@@ -157,13 +157,18 @@ def preprocess_observation(
     observation: Observation,
     *,
     train: bool = False,
-    image_keys: Sequence[str] = IMAGE_KEYS,
+    image_keys: Sequence[str] | None = None,
     image_resolution: tuple[int, int] = IMAGE_RESOLUTION,
 ) -> Observation:
     """Preprocess the observations by performing image augmentations (if train=True), resizing (if necessary), and
     filling in a default image mask (if necessary).
     """
 
+    # Pi0 configs can provide an expanded camera set (for example the four
+    # Bench2Dex RGB views). When no explicit subset is requested, preserve all
+    # images supplied by the data transform; legacy configs still supply the
+    # original three views.
+    image_keys = tuple(observation.images) if image_keys is None else tuple(image_keys)
     if not set(image_keys).issubset(observation.images):
         raise ValueError(f"images dict missing keys: expected {image_keys}, got {list(observation.images)}")
 

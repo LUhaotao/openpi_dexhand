@@ -147,3 +147,19 @@ openpi这个代码的Config记录很有问题，每一个Train-Infer必须成对
 3. 随机初始化+最后一层权重0，bias=logit(0.2) -> sigmoid(logit(0.2))=0.2
 
 4. 不同chunk分别使用一次TCN，通过位置编码区分chunk，输出不同chunk一个标量gate
+
+## version 0.3 fix
+
+- [*] 梯度累计
+
+- [*] 可学习门控对比实验
+
+## version 0.3.1
+
+- [] bench2dex baseline
+
+- [] 对齐tacforcing训练tactile attention gate + delay（15000step，256batch，需要设计一个指定save步数[4000, 15000]）
+
+## version 0.3.1 fix 
+
+- [] bench2dex 力触觉注入（encoder的输入维度自适应）

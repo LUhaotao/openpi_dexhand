@@ -6,6 +6,7 @@ to the config assets directory.
 """
 
 import numpy as np
+import pathlib
 import tqdm
 import tyro
 
@@ -108,7 +109,14 @@ def main(config_name: str, max_frames: int | None = None):
 
     norm_stats = {key: stats.get_statistics() for key, stats in stats.items()}
 
-    output_path = config.assets_dirs / data_config.repo_id
+    # Use the configured asset id instead of repo_id. Bench2Dex uses an
+    # absolute local dataset path as repo_id, which must never become the
+    # output location for generated training assets.
+    asset_id = data_config.asset_id or "dataset"
+    asset_path = pathlib.Path(asset_id)
+    if asset_path.is_absolute():
+        asset_path = pathlib.Path(asset_path.name)
+    output_path = config.assets_dirs / asset_path
     print(f"Writing stats to: {output_path}")
     normalize.save(output_path, norm_stats)
 

@@ -1,4 +1,11 @@
+import csv
+import fcntl
+import functools
+import itertools
 import logging
+import pathlib
+import threading
+import time
 
 import einops
 import flax.linen as nn
@@ -17,6 +24,37 @@ from openpi.shared import array_typing as at
 logger = logging.getLogger("openpi")
 
 _TACTILE_GATE_BIAS = -1.38629436112
+_REPO_ROOT = pathlib.Path(__file__).resolve().parents[3]
+_GATE_LOG_DIR = _REPO_ROOT / "log"
+_GATE_LOG_LOCK = threading.Lock()
+_GATE_PATH_INDEX = itertools.count()
+
+
+def _append_tactile_gate_log(exp_name: str, gates) -> None:
+    """Append one JAX gate evaluation to the experiment CSV on the host."""
+    import numpy as np
+
+    gates = np.asarray(gates)
+    if gates.ndim != 2:
+        raise ValueError(f"Expected tactile gate values with shape [batch, chunks], got {gates.shape}")
+
+    path = _GATE_LOG_DIR / f"{exp_name}-gate.csv"
+    timestamp = time.time()
+    with _GATE_LOG_LOCK:
+        path_index = next(_GATE_PATH_INDEX)
+        _GATE_LOG_DIR.mkdir(parents=True, exist_ok=True)
+        with path.open("a+", newline="") as file:
+            fcntl.flock(file.fileno(), fcntl.LOCK_EX)
+            file.seek(0, 2)
+            write_header = file.tell() == 0
+            writer = csv.writer(file)
+            if write_header:
+                writer.writerow(("timestamp", "path_index", "batch_index", "chunk_index", "log_gate"))
+            for batch_index, row in enumerate(gates):
+                for chunk_index, value in enumerate(row):
+                    writer.writerow((timestamp, path_index, batch_index, chunk_index, float(value)))
+            file.flush()
+            fcntl.flock(file.fileno(), fcntl.LOCK_UN)
 
 
 def _tactile_gate_bias_init(key, shape, dtype=jnp.float32):
@@ -125,6 +163,7 @@ class Pi0(_model.BaseModel):
         self.streaming_constant_weight = config.streaming_constant_weight
         self.streaming_chunk_wise_weight = config.streaming_chunk_wise_weight
         self.streaming_token_wise_weight = config.streaming_token_wise_weight
+        self._gate_log_exp_name: str | None = None
         self.use_tactile = config.use_tactile
         self.use_tactile_adarms = config.use_tactile_adarms
         self.tactile_history_length = config.tactile_history_length
@@ -188,6 +227,10 @@ class Pi0(_model.BaseModel):
 
         # This attribute gets automatically set by model.train() and model.eval().
         self.deterministic = True
+
+    def set_gate_log_exp_name(self, exp_name: str | None) -> None:
+        """Set the experiment name used by the host-side tactile gate logger."""
+        self._gate_log_exp_name = exp_name
 
     @at.typecheck
     def embed_prefix(
@@ -295,7 +338,14 @@ class Pi0(_model.BaseModel):
         x = jax.nn.gelu(x + self.tactile_tcn_1(self._causal_conv_inputs(x, dilation=1)))
         x = jax.nn.gelu(x + self.tactile_tcn_2(self._causal_conv_inputs(x, dilation=2)))
         logits = self.tactile_gate_out(x[:, -1, :]).reshape(batch_size, chunk_count)
-        return jax.nn.log_sigmoid(logits)
+        log_gates = jax.nn.log_sigmoid(logits)
+        if self._gate_log_exp_name is not None:
+            jax.debug.callback(
+                functools.partial(_append_tactile_gate_log, self._gate_log_exp_name),
+                log_gates,
+                ordered=True,
+            )
+        return log_gates
 
     @staticmethod
     def _causal_conv_inputs(x: at.Float[at.Array, "b t d"], *, dilation: int) -> at.Float[at.Array, "b t d3"]:

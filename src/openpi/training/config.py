@@ -10,6 +10,8 @@ from typing import Any, Literal, Protocol, TypeAlias
 
 import etils.epath as epath
 import flax.nnx as nnx
+import jax
+import jax.numpy as jnp
 from typing_extensions import override
 import tyro
 
@@ -19,11 +21,13 @@ import openpi.models.pi0_fast as pi0_fast
 import openpi.models.tokenizer as _tokenizer
 import openpi.policies.aloha_policy as aloha_policy
 # import openpi.policies.aloha_policy_my as aloha_policy
+import openpi.policies.bench2dex_policy as bench2dex_policy
 import openpi.policies.droid_policy as droid_policy
 import openpi.policies.franka_xhand_policy as franka_xhand_policy
 import openpi.policies.libero_policy as libero_policy
 import openpi.shared.download as _download
 import openpi.shared.normalize as _normalize
+from openpi.shared import array_typing as at
 import openpi.training.droid_rlds_dataset as droid_rlds_dataset
 import openpi.training.misc.roboarena_config as roboarena_config
 import openpi.training.optimizer as _optimizer
@@ -33,6 +37,28 @@ import openpi.transforms as _transforms
 ModelType: TypeAlias = _model.ModelType
 # Work around a tyro issue with using nnx.filterlib.Filter directly.
 Filter: TypeAlias = nnx.filterlib.Filter
+
+
+@dataclasses.dataclass(frozen=True)
+class Bench2DexPi05Config(pi0_config.Pi0Config):
+    """Pi0.5 input spec for the four RGB Bench2Dex camera streams."""
+
+    image_keys: tuple[str, ...] = bench2dex_policy.BENCH2DEX_MODEL_IMAGES
+
+    @override
+    def inputs_spec(self, *, batch_size: int = 1) -> tuple[_model.Observation, _model.Actions]:
+        image_spec = jax.ShapeDtypeStruct([batch_size, *_model.IMAGE_RESOLUTION, 3], jnp.float32)
+        image_mask_spec = jax.ShapeDtypeStruct([batch_size], jnp.bool_)
+        with at.disable_typechecking():
+            observation_spec = _model.Observation(
+                images={key: image_spec for key in self.image_keys},
+                image_masks={key: image_mask_spec for key in self.image_keys},
+                state=jax.ShapeDtypeStruct([batch_size, self.action_dim], jnp.float32),
+                tokenized_prompt=jax.ShapeDtypeStruct([batch_size, self.max_token_len], jnp.int32),
+                tokenized_prompt_mask=jax.ShapeDtypeStruct([batch_size, self.max_token_len], bool),
+            )
+        action_spec = jax.ShapeDtypeStruct([batch_size, self.action_horizon, self.action_dim], jnp.float32)
+        return observation_spec, action_spec
 
 
 @dataclasses.dataclass(frozen=True)
@@ -445,6 +471,61 @@ class LeRobotFrankaXHandDataConfig(DataConfigFactory):
             repack_transforms=self.repack_transforms,
             data_transforms=data_transforms,
             model_transforms=model_transforms,
+            action_sequence_keys=self.action_sequence_keys,
+        )
+
+
+@dataclasses.dataclass(frozen=True)
+class Bench2DexDataConfig(DataConfigFactory):
+    """LeRobot v2.1 adapter for the four-camera full-48D Bench2Dex data."""
+
+    state_dim: int = 48
+    action_dim: int = 48
+    base_config: tyro.conf.Suppress[DataConfig | None] = dataclasses.field(
+        default_factory=lambda: DataConfig(prompt_from_task=True)
+    )
+    assets: AssetsConfig = dataclasses.field(default_factory=lambda: AssetsConfig(asset_id="bench2dex_48d"))
+    repack_transforms: tyro.conf.Suppress[_transforms.Group] = dataclasses.field(
+        default=_transforms.Group(
+            inputs=[
+                _transforms.RepackTransform(
+                    {
+                        "images": {
+                            "stereo_left": "observation.images.stereo_left",
+                            "stereo_right": "observation.images.stereo_right",
+                            "wrist_left": "observation.images.wrist_left",
+                            "wrist_right": "observation.images.wrist_right",
+                        },
+                        "state": "observation.state",
+                        "actions": "action",
+                        "prompt": "prompt",
+                    }
+                )
+            ]
+        )
+    )
+    action_sequence_keys: Sequence[str] = ("action",)
+
+    @override
+    def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
+        if model_config.action_dim != self.action_dim:
+            raise ValueError(
+                f"Bench2Dex full-joint data requires model action_dim={self.action_dim}, "
+                f"got {model_config.action_dim}."
+            )
+        return dataclasses.replace(
+            self.create_base_config(assets_dirs, model_config),
+            repack_transforms=self.repack_transforms,
+            data_transforms=_transforms.Group(
+                inputs=[
+                    bench2dex_policy.Bench2DexInputs(
+                        state_dim=self.state_dim,
+                        action_dim=self.action_dim,
+                    )
+                ],
+                outputs=[bench2dex_policy.Bench2DexOutputs(action_dim=self.action_dim)],
+            ),
+            model_transforms=ModelTransformFactory()(model_config),
             action_sequence_keys=self.action_sequence_keys,
         )
 
@@ -2286,6 +2367,28 @@ _CONFIGS = [
         ),
         weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi0_base/params"),
         num_train_steps=20_000,
+    ),
+    # Bench2Dex RGB/full-joint baseline. The dataset is kept at 48D so the
+    # first experiment does not depend on active-DOF/mimic expansion.
+    TrainConfig(
+        name="pi05_bench2dex_fridge_wine_full48",
+        model=Bench2DexPi05Config(
+            pi05=True,
+            action_dim=48,
+            action_horizon=20,
+            max_token_len=280,
+        ),
+        data=Bench2DexDataConfig(
+            repo_id="/public/node01/users/lvrui/datasets/lerobot/bench2dex/34_fridge_wine_interhand_pour",
+            assets=AssetsConfig(asset_id="bench2dex_48d"),
+        ),
+        weight_loader=weight_loaders.LenientCheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        num_train_steps=2_000,
+        batch_size=32,
+        log_interval=50,
+        save_interval=1_000,
+        keep_period=1_000,
+        num_workers=8,
     ),
     #
     # Debugging configs.

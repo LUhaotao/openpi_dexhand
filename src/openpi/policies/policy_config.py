@@ -36,6 +36,16 @@ def _find_checkpoint_norm_stats_dir(checkpoint_dir: pathlib.Path, asset_id: str)
     )
 
 
+def _checkpoint_exp_name(checkpoint_dir: pathlib.Path) -> str:
+    """Return the experiment directory name from a checkpoint or params path."""
+    checkpoint_dir = checkpoint_dir.resolve()
+    if checkpoint_dir.name == "params":
+        checkpoint_dir = checkpoint_dir.parent
+    if len(checkpoint_dir.parts) < 2:
+        raise ValueError(f"Checkpoint path must contain an experiment directory: {checkpoint_dir}")
+    return checkpoint_dir.parent.name
+
+
 def create_trained_policy(
     train_config: _config.TrainConfig,
     checkpoint_dir: pathlib.Path | str,
@@ -83,6 +93,8 @@ def create_trained_policy(
         model.paligemma_with_expert.to_bfloat16_for_selected_params("bfloat16")
     else:
         model = train_config.model.load(_model.restore_params(checkpoint_dir / "params", dtype=jnp.bfloat16))
+        if hasattr(model, "set_gate_log_exp_name"):
+            model.set_gate_log_exp_name(_checkpoint_exp_name(pathlib.Path(checkpoint_dir)))
     data_config = train_config.data.create(train_config.assets_dirs, train_config.model)
     if norm_stats is None:
         # We are loading the norm stats from the checkpoint instead of the config assets dir to make sure
