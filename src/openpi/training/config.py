@@ -6,7 +6,7 @@ import dataclasses
 import difflib
 import logging
 import pathlib
-from typing import Any, Literal, Protocol, TypeAlias
+from typing import Annotated, Any, Literal, Protocol, TypeAlias
 
 import etils.epath as epath
 import flax.nnx as nnx
@@ -20,14 +20,15 @@ import openpi.models.pi0_config as pi0_config
 import openpi.models.pi0_fast as pi0_fast
 import openpi.models.tokenizer as _tokenizer
 import openpi.policies.aloha_policy as aloha_policy
+
 # import openpi.policies.aloha_policy_my as aloha_policy
 import openpi.policies.bench2dex_policy as bench2dex_policy
 import openpi.policies.droid_policy as droid_policy
 import openpi.policies.franka_xhand_policy as franka_xhand_policy
 import openpi.policies.libero_policy as libero_policy
+from openpi.shared import array_typing as at
 import openpi.shared.download as _download
 import openpi.shared.normalize as _normalize
-from openpi.shared import array_typing as at
 import openpi.training.droid_rlds_dataset as droid_rlds_dataset
 import openpi.training.misc.roboarena_config as roboarena_config
 import openpi.training.optimizer as _optimizer
@@ -37,6 +38,26 @@ import openpi.transforms as _transforms
 ModelType: TypeAlias = _model.ModelType
 # Work around a tyro issue with using nnx.filterlib.Filter directly.
 Filter: TypeAlias = nnx.filterlib.Filter
+
+
+def _parse_save_steps(args: list[str]) -> tuple[int, ...]:
+    """Parse exact checkpoint steps from space- or comma-separated CLI values."""
+    values = [value.strip() for arg in args for value in arg.split(",")]
+    if any(not value for value in values):
+        raise ValueError("save_steps must contain comma-separated integers.")
+    return tuple(int(value) for value in values)
+
+
+SaveSteps: TypeAlias = Annotated[
+    tuple[int, ...],
+    tyro.constructors.PrimitiveConstructorSpec(
+        nargs="*",
+        metavar="INT[,INT...]",
+        instance_from_str=_parse_save_steps,
+        is_instance=lambda value: isinstance(value, tuple) and all(isinstance(step, int) for step in value),
+        str_from_instance=lambda value: [",".join(str(step) for step in value)],
+    ),
+]
 
 
 @dataclasses.dataclass(frozen=True)
@@ -51,8 +72,8 @@ class Bench2DexPi05Config(pi0_config.Pi0Config):
         image_mask_spec = jax.ShapeDtypeStruct([batch_size], jnp.bool_)
         with at.disable_typechecking():
             observation_spec = _model.Observation(
-                images={key: image_spec for key in self.image_keys},
-                image_masks={key: image_mask_spec for key in self.image_keys},
+                images=dict.fromkeys(self.image_keys, image_spec),
+                image_masks=dict.fromkeys(self.image_keys, image_mask_spec),
                 state=jax.ShapeDtypeStruct([batch_size, self.action_dim], jnp.float32),
                 tokenized_prompt=jax.ShapeDtypeStruct([batch_size, self.max_token_len], jnp.int32),
                 tokenized_prompt_mask=jax.ShapeDtypeStruct([batch_size, self.max_token_len], bool),
@@ -477,10 +498,11 @@ class LeRobotFrankaXHandDataConfig(DataConfigFactory):
 
 @dataclasses.dataclass(frozen=True)
 class Bench2DexDataConfig(DataConfigFactory):
-    """LeRobot v2.1 adapter for the four-camera full-48D Bench2Dex data."""
+    """LeRobot v2.1 adapter for the four-camera Bench2Dex data."""
 
     state_dim: int = 48
     action_dim: int = 48
+    use_active_dof: bool = False
     base_config: tyro.conf.Suppress[DataConfig | None] = dataclasses.field(
         default_factory=lambda: DataConfig(prompt_from_task=True)
     )
@@ -521,6 +543,7 @@ class Bench2DexDataConfig(DataConfigFactory):
                     bench2dex_policy.Bench2DexInputs(
                         state_dim=self.state_dim,
                         action_dim=self.action_dim,
+                        use_active_dof=self.use_active_dof,
                     )
                 ],
                 outputs=[bench2dex_policy.Bench2DexOutputs(action_dim=self.action_dim)],
@@ -758,6 +781,9 @@ class TrainConfig:
     log_interval: int = 100
     # How often (in steps) to save checkpoints.
     save_interval: int = 1000
+    # Exact train-state steps to save. When non-empty, this replaces save_interval;
+    # the final train-state step is always saved as well.
+    save_steps: SaveSteps = ()
     # If set, any existing checkpoints matching step % keep_period == 0 will not be deleted.
     keep_period: int | None = 5000
 
@@ -798,6 +824,9 @@ class TrainConfig:
     def __post_init__(self) -> None:
         if self.resume and self.overwrite:
             raise ValueError("Cannot resume and overwrite at the same time.")
+        if any(step <= 0 for step in self.save_steps):
+            raise ValueError("save_steps must contain positive train-state steps.")
+
 
 def make_univtac_config(
     dataset_name: str,
@@ -2375,20 +2404,48 @@ _CONFIGS = [
         model=Bench2DexPi05Config(
             pi05=True,
             action_dim=48,
-            action_horizon=20,
+            action_horizon=50,
             max_token_len=280,
         ),
         data=Bench2DexDataConfig(
             repo_id="/public/node01/users/lvrui/datasets/lerobot/bench2dex/34_fridge_wine_interhand_pour",
             assets=AssetsConfig(asset_id="bench2dex_48d"),
         ),
-        weight_loader=weight_loaders.LenientCheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        weight_loader=weight_loaders.CheckpointWeightLoader("ckpt/pi0_ckpt/pi05_base/params"),
         num_train_steps=2_000,
         batch_size=32,
         log_interval=50,
         save_interval=1_000,
         keep_period=1_000,
-        num_workers=8,
+        num_workers=32,
+    ),
+    # Bench2Dex-aligned active-DOF baseline. The official dataset directory
+    # contains a 38-D norm_stats.json matching this joint layout.
+    TrainConfig(
+        name="pi05_bench2dex_fridge_wine_active38",
+        model=Bench2DexPi05Config(
+            pi05=True,
+            action_dim=38,
+            action_horizon=50,
+            max_token_len=280,
+        ),
+        data=Bench2DexDataConfig(
+            repo_id="/public/node01/users/lvrui/datasets/lerobot/bench2dex/34_fridge_wine_interhand_pour",
+            state_dim=38,
+            action_dim=38,
+            use_active_dof=True,
+            assets=AssetsConfig(
+                assets_dir="/public/node01/users/lvrui/datasets/lerobot/bench2dex/34_fridge_wine_interhand_pour",
+                asset_id=".",
+            ),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("ckpt/pi0_ckpt/pi05_base/params"),
+        num_train_steps=2_000,
+        batch_size=32,
+        log_interval=50,
+        save_interval=1_000,
+        keep_period=1_000,
+        num_workers=32,
     ),
     #
     # Debugging configs.

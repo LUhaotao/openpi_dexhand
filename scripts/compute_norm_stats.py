@@ -5,8 +5,9 @@ will compute the mean and standard deviation of the data in the dataset and save
 to the config assets directory.
 """
 
-import numpy as np
 import pathlib
+
+import numpy as np
 import tqdm
 import tyro
 

@@ -1,9 +1,4 @@
-"""LeRobot transforms for the Bench2Dex RGB/full-joint policy.
-
-The first OpenPI Bench2Dex baseline keeps the dataset's 48-D full joint layout
-and trains absolute joint-position actions. Mimic-joint reduction is left for
-a separate active-DOF experiment so this adapter stays lossless.
-"""
+"""LeRobot transforms for the Bench2Dex RGB/action policies."""
 
 from __future__ import annotations
 
@@ -14,7 +9,6 @@ import einops
 import numpy as np
 
 from openpi import transforms
-
 
 BENCH2DEX_CAMERAS: tuple[str, ...] = (
     "stereo_left",
@@ -30,6 +24,11 @@ BENCH2DEX_MODEL_IMAGES: tuple[str, ...] = (
     "right_wrist_0_rgb",
 )
 
+BENCH2DEX_ACTIVE_INDICES: tuple[int, ...] = (
+    0, 1, 3, 5, 7, 9, 16, 21, 39, 12, 17, 27, 13, 18, 28, 15, 20, 14, 19,
+    2, 4, 6, 8, 10, 11, 26, 36, 47, 22, 32, 40, 23, 33, 41, 25, 35, 24, 34,
+)
+
 
 @dataclasses.dataclass(frozen=True)
 class Bench2DexInputs(transforms.DataTransformFn):
@@ -37,11 +36,13 @@ class Bench2DexInputs(transforms.DataTransformFn):
 
     state_dim: int = 48
     action_dim: int = 48
+    use_active_dof: bool = False
     expected_cameras: ClassVar[tuple[str, ...]] = BENCH2DEX_CAMERAS
 
     def __post_init__(self) -> None:
-        if self.state_dim != 48 or self.action_dim != 48:
-            raise ValueError("The initial Bench2Dex baseline requires state_dim=action_dim=48.")
+        expected_dim = len(BENCH2DEX_ACTIVE_INDICES) if self.use_active_dof else 48
+        if self.state_dim != expected_dim or self.action_dim != expected_dim:
+            raise ValueError(f"Bench2Dex dimensions must be {expected_dim} for this layout.")
 
     def __call__(self, data: dict) -> dict:
         images = data.get("images")
@@ -57,11 +58,11 @@ class Bench2DexInputs(transforms.DataTransformFn):
         }
         output = {
             "image": output_images,
-            "image_mask": {key: np.True_ for key in output_images},
-            "state": _require_dim(data["state"], self.state_dim, "state"),
+            "image_mask": dict.fromkeys(output_images, np.True_),
+            "state": _select_dof(data["state"], self.state_dim, self.use_active_dof, "state"),
         }
         if "actions" in data:
-            output["actions"] = _require_dim(data["actions"], self.action_dim, "actions")
+            output["actions"] = _select_dof(data["actions"], self.action_dim, self.use_active_dof, "actions")
         if "prompt" in data:
             output["prompt"] = data["prompt"]
         return output
@@ -82,6 +83,15 @@ def _require_dim(value: np.ndarray, dim: int, name: str) -> np.ndarray:
     if array.shape[-1] != dim:
         raise ValueError(f"Bench2Dex {name} has dim {array.shape[-1]}, expected {dim}.")
     return array
+
+
+def _select_dof(value: np.ndarray, output_dim: int, active: bool, name: str) -> np.ndarray:
+    array = _require_dim(value, 48, name)
+    if not active:
+        return array
+    if output_dim != len(BENCH2DEX_ACTIVE_INDICES):
+        raise ValueError(f"Expected active Bench2Dex {name} dim {len(BENCH2DEX_ACTIVE_INDICES)}")
+    return array[..., BENCH2DEX_ACTIVE_INDICES]
 
 
 def _to_hwc_uint8(image: np.ndarray) -> np.ndarray:

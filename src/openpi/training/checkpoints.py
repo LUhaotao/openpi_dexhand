@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Collection
 import concurrent.futures as futures
 import dataclasses
 import logging
@@ -20,7 +21,12 @@ import openpi.training.utils as training_utils
 
 
 def initialize_checkpoint_dir(
-    checkpoint_dir: epath.Path | str, *, keep_period: int | None, overwrite: bool, resume: bool
+    checkpoint_dir: epath.Path | str,
+    *,
+    keep_period: int | None,
+    max_to_keep: int | None = 1,
+    overwrite: bool,
+    resume: bool,
 ) -> tuple[ocp.CheckpointManager, bool]:
     checkpoint_dir = epath.Path(checkpoint_dir).resolve()
     resuming = False
@@ -48,7 +54,7 @@ def initialize_checkpoint_dir(
             "params": ocp.PyTreeCheckpointHandler(),
         },
         options=ocp.CheckpointManagerOptions(
-            max_to_keep=1,
+            max_to_keep=max_to_keep,
             keep_period=keep_period,
             create=False,
             async_options=ocp.AsyncOptions(timeout_secs=7200),
@@ -63,6 +69,25 @@ def initialize_checkpoint_dir(
         resuming = False
 
     return mngr, resuming
+
+
+def should_save_checkpoint(
+    step: int,
+    *,
+    num_train_steps: int,
+    save_interval: int,
+    save_steps: Collection[int],
+    start_step: int,
+) -> bool:
+    """Return whether a checkpoint should be saved at the given checkpoint step.
+
+    ``step`` is the train-state step when ``save_steps`` is provided. The legacy
+    interval mode keeps the existing zero-based loop-step behavior for backwards
+    compatibility.
+    """
+    if save_steps:
+        return step in save_steps or step == num_train_steps
+    return (step % save_interval == 0 and step > start_step) or step == num_train_steps - 1
 
 
 def save_state(

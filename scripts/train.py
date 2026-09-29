@@ -269,7 +269,9 @@ def main(config: _config.TrainConfig):
 
     checkpoint_manager, resuming = _checkpoints.initialize_checkpoint_dir(
         config.checkpoint_dir,
-        keep_period=config.keep_period,
+        # Exact-step mode controls retention itself; keep every requested step.
+        keep_period=None if config.save_steps else config.keep_period,
+        max_to_keep=(len(set(config.save_steps) | {config.num_train_steps}) if config.save_steps else 1),
         overwrite=config.overwrite,
         resume=config.resume,
     )
@@ -328,8 +330,15 @@ def main(config: _config.TrainConfig):
             infos = []
         batch = _next_train_batch(data_iter, accumulation_steps, train_data_sharding)
 
-        if (step % config.save_interval == 0 and step > start_step) or step == config.num_train_steps - 1:
-            _checkpoints.save_state(checkpoint_manager, train_state, data_loader, step, config.model)
+        checkpoint_step = int(train_state.step) if config.save_steps else step
+        if _checkpoints.should_save_checkpoint(
+            checkpoint_step,
+            num_train_steps=config.num_train_steps,
+            save_interval=config.save_interval,
+            save_steps=config.save_steps,
+            start_step=start_step,
+        ):
+            _checkpoints.save_state(checkpoint_manager, train_state, data_loader, checkpoint_step, config.model)
 
     logging.info("Waiting for checkpoint manager to finish")
     checkpoint_manager.wait_until_finished()

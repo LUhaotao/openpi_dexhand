@@ -154,11 +154,13 @@ openpi这个代码的Config记录很有问题，每一个Train-Infer必须成对
 
 - [*] 可学习门控对比实验
 
+- [] gate日志
+
 ## version 0.3.1
 
-- [] bench2dex baseline
+- [*] bench2dex baseline
 
-- [] 对齐tacforcing训练tactile attention gate + delay（15000step，256batch，需要设计一个指定save步数[4000, 15000]）
+- [*] 对齐tacforcing训练tactile attention gate + delay（15000step，256batch，需要设计一个指定save步数[4000, 15000]）
 
 ## version 0.3.1 fix 
 

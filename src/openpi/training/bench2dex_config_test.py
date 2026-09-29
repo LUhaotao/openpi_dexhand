@@ -7,13 +7,29 @@ def test_bench2dex_full48_config_uses_four_images_and_absolute_space():
     data_config = train_config.data.create(train_config.assets_dirs, train_config.model)
 
     assert train_config.model.action_dim == 48
-    assert train_config.model.action_horizon == 20
+    assert train_config.model.action_horizon == 50
+    assert train_config.num_workers == 32
     assert tuple(observation_spec.images) == (
         "base_0_rgb",
         "base_1_rgb",
         "left_wrist_0_rgb",
         "right_wrist_0_rgb",
     )
-    assert action_spec.shape == (2, 20, 48)
+    assert action_spec.shape == (2, 50, 48)
     assert data_config.action_sequence_keys == ("action",)
     assert data_config.use_quantile_norm
+
+
+def test_bench2dex_active38_config_uses_official_asset():
+    train_config = config.get_config("pi05_bench2dex_fridge_wine_active38")
+    data_config = train_config.data.create(train_config.assets_dirs, train_config.model)
+
+    assert train_config.model.action_dim == 38
+    assert train_config.model.action_horizon == 50
+    assert train_config.num_workers == 32
+    assert data_config.asset_id == "."
+    assert isinstance(data_config.data_transforms.inputs[0].use_active_dof, bool)
+    assert data_config.data_transforms.inputs[0].use_active_dof
+    assert data_config.norm_stats is not None
+    assert len(data_config.norm_stats["state"].mean) == 38
+    assert len(data_config.norm_stats["actions"].mean) == 38
