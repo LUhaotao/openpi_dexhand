@@ -59,14 +59,22 @@ class Policy(BasePolicy):
         self._metadata = metadata or {}
         self._is_pytorch_model = is_pytorch
         self._pytorch_device = pytorch_device
+        gate_sources = tuple(getattr(model, "gate_sources", ()))
+        unified_gate = not is_pytorch and getattr(model, "streaming_attention_mode", None) == "attention_gate"
         self._tactile_history_length = (
-            int(model.tactile_history_length)
+            int(model.gate_history_length if unified_gate else model.tactile_history_length)
             if not is_pytorch
-            and getattr(model, "streaming_attention_mode", None) == "tactile_attention_gate"
+            and (getattr(model, "streaming_attention_mode", None) == "tactile_attention_gate" or (unified_gate and "tactile" in gate_sources))
             else 0
         )
         self._tactile_histories: dict[str, tuple[deque, deque]] = {}
         self._torque_histories: dict[str, deque] = {}
+        self._state_history_length = (
+            int(model.gate_history_length if unified_gate else model.state_history_length)
+            if not is_pytorch and (getattr(model, "streaming_attention_mode", None) == "state_attention_gate" or (unified_gate and "state" in gate_sources))
+            else 0
+        )
+        self._state_histories: dict[str, deque] = {}
         self._tactile_history_lock = threading.Lock()
 
         if self._is_pytorch_model:
@@ -97,19 +105,45 @@ class Policy(BasePolicy):
     ) -> _model.Observation:
         inputs = jax.tree.map(lambda x: x, obs)
         inputs = self._input_transform(inputs)
+        model = getattr(self, "_model", None)
+        gate_sources = tuple(getattr(model, "gate_sources", ()))
+        unified_gate = getattr(model, "streaming_attention_mode", None) == "attention_gate"
         if self._tactile_history_length and update_tactile_history:
             self._attach_tactile_history(inputs, session_id)
-        if getattr(getattr(self, "_model", None), "streaming_attention_mode", None) == "torque_attention_gate":
+        if getattr(self, "_state_history_length", 0) and update_tactile_history:
+            self._attach_state_history(inputs, session_id)
+        if getattr(getattr(self, "_model", None), "streaming_attention_mode", None) == "torque_attention_gate" or (
+            unified_gate and "torque" in gate_sources
+        ):
             self._attach_torque_history(inputs, session_id)
         inputs = jax.tree.map(lambda x: jnp.asarray(x)[np.newaxis, ...], inputs)
         return _model.Observation.from_dict(inputs)
+
+    def _attach_state_history(self, inputs: dict, session_id: str) -> None:
+        if "state_history" in inputs:
+            if np.asarray(inputs["state_history"]).shape != (
+                self._state_history_length, np.asarray(inputs["state"]).shape[-1]
+            ):
+                raise ValueError("state_history has an unexpected shape")
+            return
+        state = np.asarray(inputs["state"], dtype=np.float32)
+        with self._tactile_history_lock:
+            history = self._state_histories.setdefault(session_id, deque(maxlen=self._state_history_length))
+            history.append(state.copy())
+            while len(history) < self._state_history_length:
+                history.appendleft(history[0].copy())
+            inputs["state_history"] = np.stack(tuple(history), axis=0)
 
     def _attach_torque_history(self, inputs: dict, session_id: str) -> None:
         if "torque_history" in inputs:
             return
         if "torque" not in inputs:
             raise ValueError("torque_attention_gate requires torque")
-        length = int(self._model.tactile_history_length)
+        length = int(
+            self._model.gate_history_length
+            if getattr(self._model, "streaming_attention_mode", None) == "attention_gate"
+            else self._model.tactile_history_length
+        )
         history = self._torque_histories.setdefault(session_id, deque(maxlen=length))
         torque = np.asarray(inputs["torque"], dtype=np.float32)
         history.append(torque)
@@ -157,10 +191,11 @@ class Policy(BasePolicy):
         with self._tactile_history_lock:
             self._tactile_histories.pop(session_id, None)
             getattr(self, "_torque_histories", {}).pop(session_id, None)
+            getattr(self, "_state_histories", {}).pop(session_id, None)
 
     @property
     def tactile_history_enabled(self) -> bool:
-        return self._tactile_history_length > 0
+        return self._tactile_history_length > 0 or getattr(self, "_state_history_length", 0) > 0
 
     def infer_with_session(self, obs: dict, *, session_id: str) -> dict:
         return self.infer(obs, session_id=session_id)
@@ -170,8 +205,10 @@ class Policy(BasePolicy):
         self, obs: dict, *, noise: np.ndarray | None = None, session_id: str = "default"
     ) -> dict:  # type: ignore[misc]
         # Make a copy since transformations may modify the inputs in place.
-        uses_tactile_history = not self._is_pytorch_model and self._tactile_history_length > 0
-        if uses_tactile_history:
+        uses_observation_history = not self._is_pytorch_model and (
+            self._tactile_history_length > 0 or getattr(self, "_state_history_length", 0) > 0
+        )
+        if uses_observation_history:
             observation = self.prepare_observation(obs, session_id=session_id)
             inputs = {"state": observation.state}
             self._rng, sample_rng_or_pytorch_device = jax.random.split(self._rng)
@@ -182,7 +219,7 @@ class Policy(BasePolicy):
             # Convert inputs to PyTorch tensors and move to correct device
             inputs = jax.tree.map(lambda x: torch.from_numpy(np.array(x)).to(self._pytorch_device)[None, ...], inputs)
             sample_rng_or_pytorch_device = self._pytorch_device
-        elif not uses_tactile_history:
+        elif not uses_observation_history:
             # Make a batch and convert to jax.Array.
             inputs = jax.tree.map(lambda x: jnp.asarray(x)[np.newaxis, ...], inputs)
             self._rng, sample_rng_or_pytorch_device = jax.random.split(self._rng)
@@ -196,7 +233,7 @@ class Policy(BasePolicy):
                 noise = noise[None, ...]  # Make it (1, action_horizon, action_dim)
             sample_kwargs["noise"] = noise
 
-        if not uses_tactile_history:
+        if not uses_observation_history:
             observation = _model.Observation.from_dict(inputs)
         start_time = time.monotonic()
         outputs = {

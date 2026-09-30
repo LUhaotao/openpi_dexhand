@@ -84,8 +84,10 @@ def create_trained_policy(
     # Check if this is a PyTorch model by looking for model.safetensors
     weight_path = os.path.join(checkpoint_dir, "model.safetensors")
     is_pytorch = os.path.exists(weight_path)
-    if is_pytorch and getattr(train_config.model, "streaming_attention_mode", None) == "tactile_attention_gate":
-        raise ValueError("tactile_attention_gate is implemented only for JAX checkpoints")
+    if is_pytorch and getattr(train_config.model, "streaming_attention_mode", None) in (
+        "attention_gate", "tactile_attention_gate", "torque_attention_gate", "state_attention_gate"
+    ):
+        raise ValueError("attention gate is implemented only for JAX checkpoints")
 
     logging.info("Loading model...")
     if is_pytorch:
@@ -96,6 +98,13 @@ def create_trained_policy(
         if hasattr(model, "set_gate_log_exp_name"):
             model.set_gate_log_exp_name(_checkpoint_exp_name(pathlib.Path(checkpoint_dir)))
     data_config = train_config.data.create(train_config.assets_dirs, train_config.model)
+    # Histories are separate observation leaves but use the same per-modality
+    # statistics as their current-frame counterparts.
+    if norm_stats is not None:
+        if "state" in norm_stats and "state_history" not in norm_stats:
+            norm_stats = {**norm_stats, "state_history": norm_stats["state"]}
+        if "torque" in norm_stats and "torque_history" not in norm_stats:
+            norm_stats = {**norm_stats, "torque_history": norm_stats["torque"]}
     if norm_stats is None:
         # We are loading the norm stats from the checkpoint instead of the config assets dir to make sure
         # that the policy is using the same normalization stats as the original training process.
@@ -103,6 +112,10 @@ def create_trained_policy(
             raise ValueError("Asset id is required to load norm stats.")
         norm_stats_dir = _find_checkpoint_norm_stats_dir(checkpoint_dir, data_config.asset_id)
         norm_stats = _checkpoints.load_norm_stats(norm_stats_dir)
+    if "state" in norm_stats and "state_history" not in norm_stats:
+        norm_stats = {**norm_stats, "state_history": norm_stats["state"]}
+    if "torque" in norm_stats and "torque_history" not in norm_stats:
+        norm_stats = {**norm_stats, "torque_history": norm_stats["torque"]}
 
     # Determine the device to use for PyTorch models
     if is_pytorch and pytorch_device is None:

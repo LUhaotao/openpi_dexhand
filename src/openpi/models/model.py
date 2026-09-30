@@ -93,6 +93,8 @@ class Observation(Generic[ArrayT]):
     image_masks: dict[str, at.Bool[ArrayT, "*b"]]
     # Low-dimensional robot state.
     state: at.Float[ArrayT, "*b s"]
+    # Current-to-past window, stored oldest first, for state attention gating.
+    state_history: at.Float[ArrayT, "*b th s"] | None = None
     # Optional low-dimensional torque/effort input and history.
     torque: at.Float[ArrayT, "*b td"] | None = None
     torque_history: at.Float[ArrayT, "*b th td"] | None = None
@@ -132,6 +134,7 @@ class Observation(Generic[ArrayT]):
             images=data["image"],
             image_masks=data["image_mask"],
             state=data["state"],
+            state_history=data.get("state_history"),
             torque=data.get("torque"),
             torque_history=data.get("torque_history"),
             tactile_left_marker=data.get("tactile_left_marker"),
@@ -222,6 +225,7 @@ def preprocess_observation(
         images=out_images,
         image_masks=out_masks,
         state=observation.state,
+        state_history=observation.state_history,
         torque=observation.torque,
         torque_history=observation.torque_history,
         tactile_left_marker=observation.tactile_left_marker,

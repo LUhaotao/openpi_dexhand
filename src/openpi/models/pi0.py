@@ -93,7 +93,7 @@ def make_attn_mask(input_mask, mask_ar):
 
 def _action_ar_mask(action_horizon: int, chunk_size: int, mode: str = "causal") -> list[bool]:
     """Make action-block boundaries for the selected inter-chunk attention mode."""
-    if mode in ("mask", "bidirectional", "tactile_attention_gate", "torque_attention_gate", "learnable_gate"):
+    if mode in ("mask", "bidirectional", "attention_gate", "tactile_attention_gate", "torque_attention_gate", "state_attention_gate", "learnable_gate"):
         return [index == 0 for index in range(action_horizon)]
     return [index % chunk_size == 0 for index in range(action_horizon)]
 
@@ -171,6 +171,9 @@ class Pi0(_model.BaseModel):
         self.torque_norm_scale = config.torque_norm_scale
         self.use_tactile_adarms = config.use_tactile_adarms
         self.tactile_history_length = config.tactile_history_length
+        self.state_history_length = config.state_history_length
+        self.gate_sources = tuple(config.gate_sources)
+        self.gate_history_length = config.gate_history_length
         paligemma_config = _gemma.get_config(config.paligemma_variant)
         action_expert_config = _gemma.get_config(config.action_expert_variant)
         # TODO: rewrite gemma in NNX. For now, use bridge.
@@ -201,6 +204,8 @@ class Pi0(_model.BaseModel):
                 self.state_proj = nnx.Linear(config.action_dim, action_expert_config.width, rngs=rngs)
             self.time_mlp_in = nnx.Linear(action_expert_config.width, action_expert_config.width, rngs=rngs)
             self.time_mlp_out = nnx.Linear(action_expert_config.width, action_expert_config.width, rngs=rngs)
+            if config.streaming_attention_mode == "attention_gate" and "state" in config.gate_sources and not hasattr(self, "state_proj"):
+                self.state_proj = nnx.Linear(config.action_dim, action_expert_config.width, rngs=rngs)
             if self.use_tactile:
                 self.marker_mlp_in = nnx.Linear(pi0_config.TACTILE_MARKER_INPUT_DIM, 512, rngs=rngs)
                 self.marker_mlp_out = nnx.Linear(512, action_expert_config.width, rngs=rngs)
@@ -222,6 +227,32 @@ class Pi0(_model.BaseModel):
                     kernel_init=nn.initializers.zeros,
                     bias_init=_tactile_gate_bias_init,
                     rngs=rngs,
+                )
+            if config.streaming_attention_mode == "state_attention_gate":
+                self.state_gate_proj = nnx.Linear(config.action_dim, action_expert_config.width, rngs=rngs)
+                self.state_gate_position_dim = 32
+                self.state_gate_tcn_width = 256
+                self.state_gate_tcn_in = nnx.Linear(
+                    action_expert_config.width + self.state_gate_position_dim, self.state_gate_tcn_width, rngs=rngs
+                )
+                self.state_gate_tcn_1 = nnx.Linear(3 * self.state_gate_tcn_width, self.state_gate_tcn_width, rngs=rngs)
+                self.state_gate_tcn_2 = nnx.Linear(3 * self.state_gate_tcn_width, self.state_gate_tcn_width, rngs=rngs)
+                self.state_gate_out = nnx.Linear(
+                    self.state_gate_tcn_width, 1, kernel_init=nn.initializers.zeros,
+                    bias_init=_tactile_gate_bias_init, rngs=rngs,
+                )
+            if config.streaming_attention_mode == "attention_gate":
+                width = action_expert_config.width
+                source_count = len(config.gate_sources)
+                self.gate_fusion = nnx.Linear(source_count * width, width, rngs=rngs)
+                self.gate_position_dim = 32
+                self.gate_tcn_width = 256
+                self.gate_tcn_in = nnx.Linear(width + self.gate_position_dim, self.gate_tcn_width, rngs=rngs)
+                self.gate_tcn_1 = nnx.Linear(3 * self.gate_tcn_width, self.gate_tcn_width, rngs=rngs)
+                self.gate_tcn_2 = nnx.Linear(3 * self.gate_tcn_width, self.gate_tcn_width, rngs=rngs)
+                self.gate_out = nnx.Linear(
+                    self.gate_tcn_width, 1, kernel_init=nn.initializers.zeros,
+                    bias_init=_tactile_gate_bias_init, rngs=rngs,
                 )
         else:
             self.state_proj = nnx.Linear(config.action_dim, action_expert_config.width, rngs=rngs)
@@ -283,8 +314,13 @@ class Pi0(_model.BaseModel):
         right_embedding = self._encode_marker_frames(obs.tactile_right_marker)
         return self.marker_fusion(jnp.concatenate([left_embedding, right_embedding], axis=-1))
 
-    def _encode_torque(self, torque: at.Float[at.Array, "*b td"]) -> at.Float[at.Array, "*b emb"]:
-        torque = jnp.asarray(torque) / jnp.asarray(self.torque_norm_scale, dtype=torque.dtype)
+    def _encode_torque(
+        self, torque: at.Float[at.Array, "*b td"], *, apply_legacy_scale: bool = True
+    ) -> at.Float[at.Array, "*b emb"]:
+        # Unified gates receive torque_history after the dataset Normalize
+        # transform. Legacy torque gates keep their historical explicit scale.
+        if apply_legacy_scale:
+            torque = jnp.asarray(torque) / jnp.asarray(self.torque_norm_scale, dtype=torque.dtype)
         return self.torque_mlp_out(jax.nn.gelu(self.torque_mlp_in(torque)))
 
     def _encode_marker_frames(self, marker: at.Float[at.Array, "*b 2 63 2"]) -> at.Float[at.Array, "*b emb"]:
@@ -309,11 +345,92 @@ class Pi0(_model.BaseModel):
         return jnp.broadcast_to(log_gate, (batch_size, chunk_count))
 
     def _attention_log_gates(self, obs: _model.Observation) -> at.Float[at.Array, "b k"] | None:
+        if self.streaming_attention_mode == "attention_gate":
+            return self._conditioned_attention_log_gates(obs)
         if self.streaming_attention_mode == "tactile_attention_gate":
             return self._tactile_attention_log_gates(obs)
         if self.streaming_attention_mode == "torque_attention_gate":
             return self._torque_attention_log_gates_from_history(obs.torque_history)
+        if self.streaming_attention_mode == "state_attention_gate":
+            return self._state_attention_log_gates_from_history(obs.state_history)
         return self._learnable_attention_log_gates(obs.state.shape[0])
+
+    def _conditioned_attention_log_gates(self, obs: _model.Observation):
+        return self._conditioned_attention_log_gates_from_histories(
+            obs.torque_history,
+            obs.tactile_left_marker_history,
+            obs.tactile_right_marker_history,
+            obs.state_history,
+        )
+
+    def _conditioned_attention_log_gates_from_histories(
+        self, torque_history, tactile_left_marker_history, tactile_right_marker_history, state_history
+    ):
+        """Encode selected histories independently, then fuse in fixed source order."""
+        encoded = []
+        history_length = self.gate_history_length
+        for source in self.gate_sources:
+            if source == "torque":
+                if torque_history is None:
+                    raise ValueError("attention_gate requires torque_history")
+                if torque_history.shape[1] != history_length:
+                    raise ValueError(f"Expected torque history length {history_length}, got {torque_history.shape[1]}")
+                encoded.append(self._encode_torque(torque_history, apply_legacy_scale=False))
+            elif source == "tactile":
+                if tactile_left_marker_history is None or tactile_right_marker_history is None:
+                    raise ValueError("attention_gate requires tactile marker histories")
+                if tactile_left_marker_history.shape[1] != history_length:
+                    raise ValueError(f"Expected tactile history length {history_length}")
+                left = self._encode_marker_frames(tactile_left_marker_history)
+                right = self._encode_marker_frames(tactile_right_marker_history)
+                encoded.append(self.marker_fusion(jnp.concatenate([left, right], axis=-1)))
+            elif source == "state":
+                if state_history is None:
+                    raise ValueError("attention_gate requires state_history")
+                if state_history.shape[1] != history_length:
+                    raise ValueError(f"Expected state history length {history_length}, got {state_history.shape[1]}")
+                encoded.append(self.state_proj(state_history))
+        x = self.gate_fusion(jnp.concatenate(encoded, axis=-1))
+        batch_size = x.shape[0]
+        chunk_count = self.action_horizon // self.streaming_chunk_size
+        position = posemb_sincos(
+            (jnp.arange(chunk_count, dtype=jnp.float32) + 0.5) / chunk_count,
+            self.gate_position_dim, min_period=0.01, max_period=1.0,
+        )
+        position = jnp.broadcast_to(position[None, None, :, :], (batch_size, history_length, chunk_count, self.gate_position_dim))
+        x = jnp.broadcast_to(x[:, :, None, :], (batch_size, history_length, chunk_count, x.shape[-1]))
+        x = jnp.concatenate([x, position], axis=-1).transpose(0, 2, 1, 3).reshape(
+            batch_size * chunk_count, history_length, x.shape[-1] + self.gate_position_dim
+        )
+        x = jax.nn.gelu(self.gate_tcn_in(x))
+        x = jax.nn.gelu(x + self.gate_tcn_1(self._causal_conv_inputs(x, dilation=1)))
+        x = jax.nn.gelu(x + self.gate_tcn_2(self._causal_conv_inputs(x, dilation=2)))
+        return jax.nn.log_sigmoid(self.gate_out(x[:, -1, :]).reshape(batch_size, chunk_count))
+
+    def _state_attention_log_gates_from_history(self, state_history):
+        if state_history is None:
+            raise ValueError("state_attention_gate requires state_history")
+        if state_history.shape[1:] != (self.state_history_length, self.action_dim):
+            raise ValueError(
+                f"Expected state_history shape [batch, {self.state_history_length}, {self.action_dim}], "
+                f"got {state_history.shape}"
+            )
+        state = self.state_gate_proj(state_history)
+        batch_size, history_length, _ = state.shape
+        chunk_count = self.action_horizon // self.streaming_chunk_size
+        chunk_positions = (jnp.arange(chunk_count, dtype=jnp.float32) + 0.5) / chunk_count
+        position = posemb_sincos(chunk_positions, self.state_gate_position_dim, min_period=0.01, max_period=1.0)
+        position = jnp.broadcast_to(
+            position[None, :, None, :], (batch_size, chunk_count, history_length, self.state_gate_position_dim)
+        )
+        state = jnp.broadcast_to(state[:, None, :, :], (batch_size, chunk_count, history_length, state.shape[-1]))
+        x = jnp.concatenate([state, position], axis=-1).reshape(
+            batch_size * chunk_count, history_length, state.shape[-1] + self.state_gate_position_dim
+        )
+        x = jax.nn.gelu(self.state_gate_tcn_in(x))
+        x = jax.nn.gelu(x + self.state_gate_tcn_1(self._causal_conv_inputs(x, dilation=1)))
+        x = jax.nn.gelu(x + self.state_gate_tcn_2(self._causal_conv_inputs(x, dilation=2)))
+        return jax.nn.log_sigmoid(self.state_gate_out(x[:, -1, :]).reshape(batch_size, chunk_count))
 
     def _torque_attention_log_gates_from_history(self, torque_history):
         if torque_history is None:
@@ -685,17 +802,24 @@ class Pi0(_model.BaseModel):
         tactile_left_marker_history: at.Float[at.Array, "b th 2 63 2"] | None = None,
         tactile_right_marker_history: at.Float[at.Array, "b th 2 63 2"] | None = None,
         torque_history: at.Float[at.Array, "b th td"] | None = None,
+        state_history: at.Float[at.Array, "b th s"] | None = None,
     ) -> _model.Actions:
         """Run flow matching using a prefix KV cache produced by ``encode_prefix``."""
         if getattr(self, "use_tactile_adarms", False) and tactile_condition is None:
             raise ValueError("use_tactile=True requires tactile_condition for prefix sampling")
         batch_size = state.shape[0]
-        if self.streaming_attention_mode == "tactile_attention_gate":
+        if self.streaming_attention_mode == "attention_gate":
+            attention_log_gates = self._conditioned_attention_log_gates_from_histories(
+                torque_history, tactile_left_marker_history, tactile_right_marker_history, state_history
+            )
+        elif self.streaming_attention_mode == "tactile_attention_gate":
             attention_log_gates = self._tactile_attention_log_gates_from_history(
                 tactile_left_marker_history, tactile_right_marker_history
             )
         elif self.streaming_attention_mode == "torque_attention_gate":
             attention_log_gates = self._torque_attention_log_gates_from_history(torque_history)
+        elif self.streaming_attention_mode == "state_attention_gate":
+            attention_log_gates = self._state_attention_log_gates_from_history(state_history)
         elif self.streaming_attention_mode == "learnable_gate":
             attention_log_gates = self._learnable_attention_log_gates(batch_size)
         else:
@@ -738,6 +862,7 @@ class Pi0(_model.BaseModel):
         tactile_left_marker_history: at.Float[at.Array, "b th 2 63 2"] | None = None,
         tactile_right_marker_history: at.Float[at.Array, "b th 2 63 2"] | None = None,
         torque_history: at.Float[at.Array, "b th td"] | None = None,
+        state_history: at.Float[at.Array, "b th s"] | None = None,
     ) -> _model.Actions:
         """Advance a token-wise diffusion-forcing window by completed action chunks."""
         if not self.streaming:
@@ -745,12 +870,18 @@ class Pi0(_model.BaseModel):
         if getattr(self, "use_tactile_adarms", False) and tactile_condition is None:
             raise ValueError("use_tactile=True requires tactile_condition for streaming")
         attention_mode = getattr(self, "streaming_attention_mode", None)
-        if attention_mode == "tactile_attention_gate":
+        if attention_mode == "attention_gate":
+            attention_log_gates = self._conditioned_attention_log_gates_from_histories(
+                torque_history, tactile_left_marker_history, tactile_right_marker_history, state_history
+            )
+        elif attention_mode == "tactile_attention_gate":
             attention_log_gates = self._tactile_attention_log_gates_from_history(
                 tactile_left_marker_history, tactile_right_marker_history
             )
         elif attention_mode == "torque_attention_gate":
             attention_log_gates = self._torque_attention_log_gates_from_history(torque_history)
+        elif attention_mode == "state_attention_gate":
+            attention_log_gates = self._state_attention_log_gates_from_history(state_history)
         elif attention_mode == "learnable_gate":
             attention_log_gates = self._learnable_attention_log_gates(state.shape[0])
         else:

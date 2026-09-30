@@ -91,7 +91,9 @@ class MultiProcessPolicy:
     def warmup(self) -> None:
         """Compile the role's first inference path before accepting clients."""
         model = self.policy._model  # noqa: SLF001
-        tactile_attention_gate = getattr(model, "streaming_attention_mode", None) == "tactile_attention_gate"
+        gate_sources = tuple(getattr(model, "gate_sources", ()))
+        unified_gate = getattr(model, "streaming_attention_mode", None) == "attention_gate"
+        tactile_attention_gate = getattr(model, "streaming_attention_mode", None) == "tactile_attention_gate" or (unified_gate and "tactile" in gate_sources)
         observation = _model.Observation(
             images={
                 key: jnp.ones((1, *_model.IMAGE_RESOLUTION, 3), dtype=jnp.float32)
@@ -105,8 +107,13 @@ class MultiProcessPolicy:
                 else None
             ),
             torque_history=(
-                jnp.ones((1, model.tactile_history_length, model.torque_dim), dtype=jnp.float32)
-                if getattr(model, "streaming_attention_mode", None) == "torque_attention_gate"
+                jnp.ones((1, getattr(model, "gate_history_length", model.tactile_history_length), model.torque_dim), dtype=jnp.float32)
+                if getattr(model, "streaming_attention_mode", None) == "torque_attention_gate" or (unified_gate and "torque" in gate_sources)
+                else None
+            ),
+            state_history=(
+                jnp.ones((1, getattr(model, "gate_history_length", model.state_history_length), model.action_dim), dtype=jnp.float32)
+                if getattr(model, "streaming_attention_mode", None) == "state_attention_gate" or (unified_gate and "state" in gate_sources)
                 else None
             ),
             tactile_left_marker=(
@@ -165,6 +172,7 @@ class MultiProcessPolicy:
             tactile_left_marker_history=observation.tactile_left_marker_history,
             tactile_right_marker_history=observation.tactile_right_marker_history,
             torque_history=observation.torque_history,
+            state_history=observation.state_history,
         )
         self._block_until_ready(actions)
         if getattr(self.policy._model, "streaming", False):  # noqa: SLF001
@@ -180,6 +188,7 @@ class MultiProcessPolicy:
                 tactile_left_marker_history=observation.tactile_left_marker_history,
                 tactile_right_marker_history=observation.tactile_right_marker_history,
                 torque_history=observation.torque_history,
+                state_history=observation.state_history,
             )
             self._block_until_ready(advanced)
 
@@ -433,6 +442,7 @@ class MultiProcessPolicy:
                 tactile_left_marker_history=model_observation.tactile_left_marker_history,
                 tactile_right_marker_history=model_observation.tactile_right_marker_history,
                 torque_history=model_observation.torque_history,
+                state_history=model_observation.state_history,
                 num_steps=int(request.get("num_steps", 10)),
             )
         elif self._streaming_state.session_id != session_id:
@@ -456,6 +466,7 @@ class MultiProcessPolicy:
                     tactile_left_marker_history=model_observation.tactile_left_marker_history,
                     tactile_right_marker_history=model_observation.tactile_right_marker_history,
                     torque_history=model_observation.torque_history,
+                    state_history=model_observation.state_history,
                 )
                 self._streaming_state.execution_id = execution_id
 
@@ -484,6 +495,7 @@ class MultiProcessPolicy:
         tactile_left_marker_history: Any = None,
         tactile_right_marker_history: Any = None,
         torque_history: Any = None,
+        state_history: Any = None,
         num_steps: int,
     ) -> _StreamingState:
         if num_steps <= 0:
@@ -498,6 +510,7 @@ class MultiProcessPolicy:
             tactile_left_marker_history=tactile_left_marker_history,
             tactile_right_marker_history=tactile_right_marker_history,
             torque_history=torque_history,
+            state_history=state_history,
         )
         timestep = self.policy._model.streaming_timestep(actions.dtype)  # noqa: SLF001
         noise = jax.random.normal(noise_rng, actions.shape, dtype=actions.dtype)
@@ -529,8 +542,8 @@ class MultiProcessPolicy:
         if noise_tokens <= 0 or noise_tokens > self.policy._model.action_horizon:  # noqa: SLF001
             raise ValueError("noise_tokens must be in [1, action_horizon]")
         if (
-            getattr(self.policy._model, "streaming_attention_mode", None)
-            in ("tactile_attention_gate", "torque_attention_gate")  # noqa: SLF001
+            getattr(self.policy._model, "streaming_attention_mode", None)  # noqa: SLF001
+            in ("attention_gate", "tactile_attention_gate", "torque_attention_gate", "state_attention_gate")
             and noise_tokens != self.policy._model.action_horizon  # noqa: SLF001
         ):
             raise ValueError("attention gates require noise_tokens == action_horizon")
@@ -548,6 +561,7 @@ class MultiProcessPolicy:
             tactile_left_marker_history=model_observation.tactile_left_marker_history,
             tactile_right_marker_history=model_observation.tactile_right_marker_history,
             torque_history=model_observation.torque_history,
+            state_history=model_observation.state_history,
         )
         result = self.policy._output_transform(  # noqa: SLF001
             {"state": np.asarray(model_observation.state[0]), "actions": np.asarray(actions[0])}

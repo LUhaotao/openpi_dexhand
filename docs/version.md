@@ -162,8 +162,6 @@ openpi这个代码的Config记录很有问题，每一个Train-Infer必须成对
 
 - [*] 对齐tacforcing训练tactile attention gate + delay（15000step，256batch，需要设计一个指定save步数[4000, 15000]）
 
-## version 0.3.1 fix 
+- [*] bench2dex 力触觉注入（encoder的输入维度自适应），状态gate
 
-- [] bench2dex 力触觉注入（encoder的输入维度自适应）
-
-- [] client 侧控制full-active 映射
+- [*] client 侧控制full-active 映射

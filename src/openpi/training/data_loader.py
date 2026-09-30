@@ -82,11 +82,21 @@ class _DelayedObservationTransform:
         *,
         max_delay_chunks: int,
         discrete_state_input: bool,
+        chunk_size: int = 1,
+        state_history_length: int = 0,
     ):
         self._repack = _transforms.compose(repack_transforms)
         self._data = _transforms.compose(data_transforms)
         self._max_delay_chunks = max_delay_chunks
         self._discrete_state_input = discrete_state_input
+        self._chunk_size = chunk_size
+        self._state_history_length = state_history_length
+        offsets = {0}
+        if discrete_state_input:
+            offsets.update(-delay * chunk_size for delay in range(max_delay_chunks + 1))
+        if state_history_length:
+            offsets.update(range(-(state_history_length - 1), 1))
+        self._state_offsets = [0, *sorted(offsets - {0}, reverse=True)]
 
     def __call__(self, data: dict) -> dict:
         data = self._repack(data)
@@ -99,22 +109,26 @@ class _DelayedObservationTransform:
         delayed_images = {}
         for name, image in images.items():
             image_array = np.asarray(image)
-            if image_array.ndim < 4 or image_array.shape[0] != expected_history_length:
-                raise ValueError(
-                    f"Expected image history of length {expected_history_length} for {name}, "
-                    f"got shape {image_array.shape}."
-                )
-            delayed_images[name] = image_array[delay_chunks]
+            if self._max_delay_chunks:
+                if image_array.ndim < 4 or image_array.shape[0] != expected_history_length:
+                    raise ValueError(
+                        f"Expected image history of length {expected_history_length} for {name}, "
+                        f"got shape {image_array.shape}."
+                    )
+                delayed_images[name] = image_array[delay_chunks]
+            else:
+                delayed_images[name] = image_array
 
         delayed_data = {**data, "images": delayed_images}
-        if not self._discrete_state_input:
+        if not self._discrete_state_input and not self._state_history_length:
             return self._data(delayed_data)
 
         state = np.asarray(data.get("state"))
-        if state.ndim < 2 or state.shape[0] != expected_history_length:
+        expected_state_length = len(self._state_offsets) if self._state_history_length else expected_history_length
+        if state.ndim < 2 or state.shape[0] != expected_state_length:
             raise ValueError(
-                "Discrete-state observation delay requires a state history of "
-                f"length {expected_history_length}, got shape {state.shape}."
+                "State observation history requires a state history of "
+                f"length {expected_state_length}, got shape {state.shape}."
             )
 
         # Process actions against the current state. The delayed state is only
@@ -122,12 +136,22 @@ class _DelayedObservationTransform:
         current_data = {**delayed_data, "state": state[0]}
         current_processed = self._data(current_data)
 
-        delayed_state_data = {**delayed_data, "state": state[delay_chunks]}
-        delayed_state_data.pop("actions", None)
-        delayed_processed = self._data(delayed_state_data)
-        if "state" not in delayed_processed:
-            raise ValueError("Data transforms must provide 'state' for discrete-state observation delay.")
-        current_processed["state"] = delayed_processed["state"]
+        if self._state_history_length:
+            history_offsets = range(-(self._state_history_length - 1), 1)
+            history = []
+            for offset in history_offsets:
+                history_data = {**delayed_data, "state": state[self._state_offsets.index(offset)]}
+                history_data.pop("actions", None)
+                history.append(np.asarray(self._data(history_data)["state"], dtype=np.float32))
+            current_processed["state_history"] = np.stack(history, axis=0)
+        if self._discrete_state_input and self._max_delay_chunks:
+            delayed_offset = -delay_chunks * self._chunk_size
+            delayed_state_data = {**delayed_data, "state": state[self._state_offsets.index(delayed_offset)]}
+            delayed_state_data.pop("actions", None)
+            delayed_processed = self._data(delayed_state_data)
+            if "state" not in delayed_processed:
+                raise ValueError("Data transforms must provide 'state' for discrete-state observation delay.")
+            current_processed["state"] = delayed_processed["state"]
         return current_processed
 
 
@@ -216,9 +240,20 @@ def create_torch_dataset(
     }
     if apply_observation_delay:
         _add_observation_delay_timestamps(delta_timestamps, data_config, dataset_meta, model_config)
-        if getattr(model_config, "streaming_attention_mode", None) == "tactile_attention_gate":
+        if getattr(model_config, "streaming_attention_mode", None) in ("state_attention_gate", "attention_gate") and (
+            getattr(model_config, "streaming_attention_mode", None) == "state_attention_gate"
+            or "state" in getattr(model_config, "gate_sources", ())
+        ):
+            _add_state_history_timestamps(delta_timestamps, data_config, dataset_meta, model_config)
+        if getattr(model_config, "streaming_attention_mode", None) in ("tactile_attention_gate", "attention_gate") and (
+            getattr(model_config, "streaming_attention_mode", None) == "tactile_attention_gate"
+            or "tactile" in getattr(model_config, "gate_sources", ())
+        ):
             _add_tactile_history_timestamps(delta_timestamps, data_config, dataset_meta, model_config)
-        if getattr(model_config, "streaming_attention_mode", None) == "torque_attention_gate":
+        if getattr(model_config, "streaming_attention_mode", None) in ("torque_attention_gate", "attention_gate") and (
+            getattr(model_config, "streaming_attention_mode", None) == "torque_attention_gate"
+            or "torque" in getattr(model_config, "gate_sources", ())
+        ):
             _add_torque_history_timestamps(delta_timestamps, data_config, dataset_meta, model_config)
 
     dataset = lerobot_dataset.LeRobotDataset(
@@ -257,7 +292,11 @@ def _add_tactile_history_timestamps(
     dataset_meta,
     model_config: _model.BaseModelConfig,
 ) -> None:
-    history_length = int(getattr(model_config, "tactile_history_length", 0))
+    history_length = int(
+        model_config.gate_history_length
+        if getattr(model_config, "streaming_attention_mode", None) == "attention_gate"
+        else getattr(model_config, "tactile_history_length", 0)
+    )
     if history_length < 1:
         raise ValueError("tactile_history_length must be positive for tactile attention gating")
 
@@ -270,13 +309,35 @@ def _add_tactile_history_timestamps(
 
 
 def _add_torque_history_timestamps(delta_timestamps, data_config, dataset_meta, model_config) -> None:
-    history_length = int(getattr(model_config, "tactile_history_length", 0))
+    history_length = int(
+        model_config.gate_history_length
+        if getattr(model_config, "streaming_attention_mode", None) == "attention_gate"
+        else getattr(model_config, "tactile_history_length", 0)
+    )
     if history_length < 1:
         raise ValueError("tactile_history_length must be positive for torque attention gating")
     sources = _repack_source_keys(data_config, "torque")
     if len(sources) != 1 or sources[0] not in dataset_meta.features:
         raise ValueError("torque_attention_gate requires one valid torque source in the dataset.")
     delta_timestamps[sources[0]] = [offset / dataset_meta.fps for offset in range(-(history_length - 1), 1)]
+
+
+def _add_state_history_timestamps(delta_timestamps, data_config, dataset_meta, model_config) -> None:
+    sources = _repack_source_keys(data_config, "state")
+    if len(sources) != 1 or sources[0] not in dataset_meta.features:
+        raise ValueError("state_attention_gate requires one valid state source in the dataset")
+    history_length = int(
+        model_config.gate_history_length
+        if getattr(model_config, "streaming_attention_mode", None) == "attention_gate"
+        else model_config.state_history_length
+    )
+    offsets = {0}
+    offsets.update(range(-(history_length - 1), 1))
+    if model_config.discrete_state_input:
+        offsets.update(-delay * model_config.streaming_chunk_size
+                       for delay in range(model_config.observation_delay_max_chunks + 1))
+    ordered = [0, *sorted(offsets - {0}, reverse=True)]
+    delta_timestamps[sources[0]] = [offset / dataset_meta.fps for offset in ordered]
 
 
 def _observation_delay_settings(model_config: _model.BaseModelConfig) -> tuple[int, int, bool]:
@@ -358,11 +419,19 @@ def transform_dataset(
                 "Make sure to run `scripts/compute_norm_stats.py --config-name=<your-config>`."
             )
         norm_stats = data_config.norm_stats
+    if "torque" in norm_stats and "torque_history" not in norm_stats:
+        norm_stats = {**norm_stats, "torque_history": norm_stats["torque"]}
 
     if apply_observation_delay:
         if model_config is None:
             raise ValueError("model_config is required when observation delay is enabled")
-        max_delay_chunks, _, discrete_state_input = _observation_delay_settings(model_config)
+        max_delay_chunks, chunk_size, discrete_state_input = _observation_delay_settings(model_config)
+        state_history_length = (
+            int(getattr(model_config, "gate_history_length", model_config.state_history_length))
+            if getattr(model_config, "streaming_attention_mode", None) == "state_attention_gate"
+            or (getattr(model_config, "streaming_attention_mode", None) == "attention_gate" and "state" in getattr(model_config, "gate_sources", ()))
+            else 0
+        )
         input_transforms = (
             [
                 _DelayedObservationTransform(
@@ -370,13 +439,22 @@ def transform_dataset(
                     data_config.data_transforms.inputs,
                     max_delay_chunks=max_delay_chunks,
                     discrete_state_input=discrete_state_input,
+                    chunk_size=chunk_size,
+                    state_history_length=state_history_length,
                 )
             ]
-            if max_delay_chunks > 0
+            if max_delay_chunks > 0 or state_history_length > 0
             else [*data_config.repack_transforms.inputs, *data_config.data_transforms.inputs]
         )
     else:
         input_transforms = [*data_config.repack_transforms.inputs, *data_config.data_transforms.inputs]
+
+    if getattr(model_config, "streaming_attention_mode", None) == "state_attention_gate" and "state" in norm_stats:
+        norm_stats = {**norm_stats, "state_history": norm_stats["state"]}
+    if getattr(model_config, "streaming_attention_mode", None) == "attention_gate" and "state" in norm_stats:
+        norm_stats = {**norm_stats, "state_history": norm_stats["state"]}
+    if "torque" in norm_stats and "torque_history" not in norm_stats:
+        norm_stats = {**norm_stats, "torque_history": norm_stats["torque"]}
 
     return TransformedDataset(
         dataset,
@@ -404,6 +482,11 @@ def transform_iterable_dataset(
                 "Make sure to run `scripts/compute_norm_stats.py --config-name=<your-config>`."
             )
         norm_stats = data_config.norm_stats
+
+    if "torque" in norm_stats and "torque_history" not in norm_stats:
+        norm_stats = {**norm_stats, "torque_history": norm_stats["torque"]}
+    if "state" in norm_stats and "state_history" not in norm_stats:
+        norm_stats = {**norm_stats, "state_history": norm_stats["state"]}
 
     return IterableTransformedDataset(
         dataset,
@@ -437,7 +520,7 @@ def create_data_loader(
         framework: The framework to use ("jax" or "pytorch").
     """
     if framework == "pytorch" and getattr(config.model, "streaming_attention_mode", None) in (
-        "tactile_attention_gate", "torque_attention_gate"
+        "attention_gate", "tactile_attention_gate", "torque_attention_gate", "state_attention_gate"
     ):
         raise ValueError("attention gates are implemented only for the JAX training path")
     data_config = config.data.create(config.assets_dirs, config.model)

@@ -50,7 +50,7 @@ class CheckpointWeightLoader(WeightLoader):
     # older checkpoints that do not contain them. This includes the JAX-only
     # attention gates (the tactile output layer and global scalar are initialized
     # with logit(0.2)).
-    missing_regex: str = r".*lora.*|.*state_proj.*|.*marker_.*|.*tactile_.*|.*learnable_gate.*"
+    missing_regex: str = r".*lora.*|.*state_proj.*|.*state_gate.*|.*marker_.*|.*tactile_.*|.*learnable_gate.*|.*gate_(fusion|tcn|out).*"
 
     def load(self, params: at.Params) -> at.Params:
         # We are loading np.ndarray and relying on the training code to properly convert and shard the params.
@@ -63,7 +63,7 @@ class LenientCheckpointWeightLoader(WeightLoader):
     """Load compatible checkpoint leaves and keep random init on shape changes."""
 
     params_path: str
-    missing_regex: str = r".*lora.*|.*state_proj.*|.*marker_.*|.*tactile_.*|.*learnable_gate.*"
+    missing_regex: str = r".*lora.*|.*state_proj.*|.*state_gate.*|.*marker_.*|.*tactile_.*|.*learnable_gate.*|.*gate_(fusion|tcn|out).*"
 
     def load(self, params: at.Params) -> at.Params:
         loaded_params = _model.restore_params(download.maybe_download(self.params_path), restore_type=np.ndarray)

@@ -332,6 +332,8 @@ class PadStatesAndActions(DataTransformFn):
 
     def __call__(self, data: DataDict) -> DataDict:
         data["state"] = pad_to_dim(data["state"], self.model_action_dim, axis=-1)
+        if "state_history" in data:
+            data["state_history"] = pad_to_dim(data["state_history"], self.model_action_dim, axis=-1)
         if "actions" in data:
             data["actions"] = pad_to_dim(data["actions"], self.model_action_dim, axis=-1)
         return data

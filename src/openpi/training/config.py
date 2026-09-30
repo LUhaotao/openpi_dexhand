@@ -75,14 +75,23 @@ class Bench2DexPi05Config(pi0_config.Pi0Config):
                 images=dict.fromkeys(self.image_keys, image_spec),
                 image_masks=dict.fromkeys(self.image_keys, image_mask_spec),
                 state=jax.ShapeDtypeStruct([batch_size, self.action_dim], jnp.float32),
+                state_history=(
+                    jax.ShapeDtypeStruct(
+                        [batch_size, self.gate_history_length if self.streaming_attention_mode == "attention_gate" else self.state_history_length, self.action_dim], jnp.float32
+                    )
+                    if self.streaming_attention_mode == "state_attention_gate"
+                    or (self.streaming_attention_mode == "attention_gate" and "state" in self.gate_sources)
+                    else None
+                ),
                 torque=(
                     jax.ShapeDtypeStruct([batch_size, self.torque_dim], jnp.float32)
                     if self.use_torque
                     else None
                 ),
                 torque_history=(
-                    jax.ShapeDtypeStruct([batch_size, self.tactile_history_length, self.torque_dim], jnp.float32)
+                    jax.ShapeDtypeStruct([batch_size, self.gate_history_length if self.streaming_attention_mode == "attention_gate" else self.tactile_history_length, self.torque_dim], jnp.float32)
                     if self.streaming_attention_mode == "torque_attention_gate"
+                    or (self.streaming_attention_mode == "attention_gate" and "torque" in self.gate_sources)
                     else None
                 ),
                 tokenized_prompt=jax.ShapeDtypeStruct([batch_size, self.max_token_len], jnp.int32),
@@ -846,8 +855,10 @@ def make_univtac_config(
     use_tactile: bool = False,
     streaming: bool = False,
     streaming_attention_mode: Literal[
-        "mask", "causal", "bidirectional", "tactile_attention_gate", "learnable_gate"
+        "mask", "causal", "bidirectional", "attention_gate", "tactile_attention_gate", "torque_attention_gate", "state_attention_gate", "learnable_gate"
     ] = "bidirectional",
+    gate_sources: tuple[str, ...] = (),
+    gate_history_length: int = 10,
     use_tactile_adarms: bool = False,
     tactile_history_length: int = 10,
 ) -> TrainConfig:
@@ -862,6 +873,8 @@ def make_univtac_config(
             use_tactile=use_tactile,
             streaming=streaming,
             streaming_attention_mode=streaming_attention_mode,
+            gate_sources=gate_sources,
+            gate_history_length=gate_history_length,
             use_tactile_adarms=use_tactile_adarms,
             tactile_history_length=tactile_history_length,
         ),
@@ -2369,6 +2382,11 @@ _CONFIGS = [
         "insert_HDMI",
         streaming=True,
         streaming_attention_mode="learnable_gate",
+    ),
+    make_univtac_config(
+        "insert_HDMI",
+        streaming=True,
+        streaming_attention_mode="state_attention_gate",
     ),
 
     TrainConfig(

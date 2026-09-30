@@ -91,6 +91,25 @@ def test_tactile_history_is_buffered_per_session_and_left_padded():
     np.testing.assert_array_equal(restarted["tactile_left_marker_history"].reshape(-1), [3, 3, 3])
 
 
+def test_state_history_is_buffered_per_session_and_reset():
+    policy = object.__new__(_policy.Policy)
+    policy._state_history_length = 3
+    policy._state_histories = {}
+    policy._tactile_histories = {}
+    policy._tactile_history_lock = threading.Lock()
+
+    first = {"state": np.asarray([1.0], dtype=np.float32)}
+    policy._attach_state_history(first, "a")
+    np.testing.assert_array_equal(first["state_history"].reshape(-1), [1, 1, 1])
+    second = {"state": np.asarray([2.0], dtype=np.float32)}
+    policy._attach_state_history(second, "a")
+    np.testing.assert_array_equal(second["state_history"].reshape(-1), [1, 1, 2])
+    policy.reset_tactile_history("a")
+    restarted = {"state": np.asarray([3.0], dtype=np.float32)}
+    policy._attach_state_history(restarted, "a")
+    np.testing.assert_array_equal(restarted["state_history"].reshape(-1), [3, 3, 3])
+
+
 def test_policy_infer_batches_a_single_frame_history_window():
     policy = object.__new__(_policy.Policy)
     policy._is_pytorch_model = False

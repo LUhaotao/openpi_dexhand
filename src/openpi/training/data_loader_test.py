@@ -77,6 +77,26 @@ def test_delayed_observation_transform_keeps_continuous_state_current(monkeypatc
     np.testing.assert_array_equal(result["state"], [7.0])
 
 
+def test_state_gate_history_and_delayed_discrete_prompt_use_separate_states(monkeypatch):
+    repack = _transforms.RepackTransform(
+        {"images": {"camera": "observation.images.camera"}, "state": "observation.state", "actions": "action"}
+    )
+    transform = _data_loader._DelayedObservationTransform(  # noqa: SLF001
+        [repack], [_transforms.DeltaActions(mask=[True])],
+        max_delay_chunks=2, discrete_state_input=True, chunk_size=2, state_history_length=3,
+    )
+    monkeypatch.setattr(np.random, "randint", lambda *args: 2)
+    result = transform({
+        "observation.images.camera": np.zeros((3, 2, 2, 3), dtype=np.uint8),
+        # Offsets 0, -1, -2, -4; the prompt uses -4, while gate uses -2..0.
+        "observation.state": np.asarray([[1.0], [2.0], [3.0], [5.0]], dtype=np.float32),
+        "action": np.asarray([[8.0]], dtype=np.float32),
+    })
+    np.testing.assert_array_equal(result["state"], [5.0])
+    np.testing.assert_array_equal(result["state_history"].reshape(-1), [3.0, 2.0, 1.0])
+    np.testing.assert_array_equal(result["actions"], [[7.0]])
+
+
 def test_observation_delay_timestamps_use_chunk_size_for_images_and_discrete_state():
     data_config = _config.DataConfig(
         repack_transforms=_transforms.Group(
@@ -152,6 +172,23 @@ def test_tactile_history_timestamps_are_current_to_past():
     expected = [-0.15, -0.1, -0.05, 0.0]
     assert delta_timestamps["observation.tactile.left_marker"] == expected
     assert delta_timestamps["observation.tactile.right_marker"] == expected
+
+
+def test_state_gate_timestamps_include_history_and_delayed_prompt():
+    data_config = _config.DataConfig(
+        repack_transforms=_transforms.Group(inputs=[_transforms.RepackTransform({"state": "observation.state"})])
+    )
+    model_config = pi0_config.Pi0Config(
+        pi05=True, streaming=True, action_horizon=6, streaming_chunk_size=2,
+        streaming_attention_mode="state_attention_gate", state_history_length=3,
+        observation_delay_max_chunks=2,
+    )
+    timestamps = {}
+    dataset_meta = SimpleNamespace(fps=10, features={"observation.state": {"dtype": "float32"}})
+    _data_loader._add_state_history_timestamps(  # noqa: SLF001
+        timestamps, data_config, dataset_meta, model_config
+    )
+    assert timestamps["observation.state"] == [0.0, -0.1, -0.2, -0.4]
 
 
 def test_torch_data_loader():
