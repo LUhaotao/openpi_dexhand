@@ -88,12 +88,16 @@ def _require_dim(value: np.ndarray, dim: int, name: str) -> np.ndarray:
 
 
 def _select_dof(value: np.ndarray, output_dim: int, active: bool, name: str) -> np.ndarray:
-    array = _require_dim(value, 48, name)
+    array = np.asarray(value, dtype=np.float32)
     if not active:
-        return array
+        return _require_dim(array, 48, name)
     if output_dim != len(BENCH2DEX_ACTIVE_INDICES):
         raise ValueError(f"Expected active Bench2Dex {name} dim {len(BENCH2DEX_ACTIVE_INDICES)}")
-    return array[..., BENCH2DEX_ACTIVE_INDICES]
+    if array.shape[-1] != output_dim:
+        raise ValueError(
+            f"Active Bench2Dex {name} must be offline-converted to dim {output_dim}; got {array.shape[-1]}"
+        )
+    return array
 
 
 def _to_hwc_uint8(image: np.ndarray) -> np.ndarray:

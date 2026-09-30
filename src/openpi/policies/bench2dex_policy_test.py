@@ -40,15 +40,13 @@ def test_bench2dex_inputs_select_active_38d_actions():
             "wrist_left": np.zeros((8, 9, 3), dtype=np.uint8),
             "wrist_right": np.zeros((8, 9, 3), dtype=np.uint8),
         },
-        "state": np.arange(48, dtype=np.float32),
-        "actions": np.broadcast_to(np.arange(48, dtype=np.float32), (50, 48)),
+        "state": np.arange(38, dtype=np.float32),
+        "actions": np.broadcast_to(np.arange(38, dtype=np.float32), (50, 38)),
     }
 
     output = transform(sample)
 
     assert output["state"].shape == (38,)
     assert output["actions"].shape == (50, 38)
-    np.testing.assert_array_equal(output["state"][0], 0.0)
-    np.testing.assert_array_equal(output["state"][8], 8.0)
-    np.testing.assert_array_equal(output["state"][29], 32.0)
-    np.testing.assert_array_equal(output["state"][-1], 47.0)
+    np.testing.assert_array_equal(output["state"], sample["state"])
+    np.testing.assert_array_equal(output["actions"], sample["actions"])

@@ -2430,12 +2430,12 @@ _CONFIGS = [
             max_token_len=280,
         ),
         data=Bench2DexDataConfig(
-            repo_id="/public/node01/users/lvrui/datasets/lerobot/bench2dex/34_fridge_wine_interhand_pour",
+            repo_id="/public/node01/users/lvrui/datasets/lerobot/bench2dex/34_fridge_wine_interhand_pour_active38",
             state_dim=38,
             action_dim=38,
             use_active_dof=True,
             assets=AssetsConfig(
-                assets_dir="/public/node01/users/lvrui/datasets/lerobot/bench2dex/34_fridge_wine_interhand_pour",
+                assets_dir="/public/node01/users/lvrui/datasets/lerobot/bench2dex/34_fridge_wine_interhand_pour_active38",
                 asset_id=".",
             ),
         ),
