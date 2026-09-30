@@ -49,10 +49,11 @@ def _append_tactile_gate_log(exp_name: str, gates) -> None:
             write_header = file.tell() == 0
             writer = csv.writer(file)
             if write_header:
-                writer.writerow(("timestamp", "path_index", "batch_index", "chunk_index", "log_gate"))
+                writer.writerow(("timestamp", "path_index", "batch_index", "chunk_index", "log_gate", "gate"))
             for batch_index, row in enumerate(gates):
                 for chunk_index, value in enumerate(row):
-                    writer.writerow((timestamp, path_index, batch_index, chunk_index, float(value)))
+                    log_gate = float(value)
+                    writer.writerow((timestamp, path_index, batch_index, chunk_index, log_gate, np.exp(log_gate)))
             file.flush()
             fcntl.flock(file.fileno(), fcntl.LOCK_UN)
 
