@@ -25,8 +25,10 @@ BENCH2DEX_MODEL_IMAGES: tuple[str, ...] = (
 )
 
 BENCH2DEX_ACTIVE_INDICES: tuple[int, ...] = (
-    0, 1, 3, 5, 7, 9, 16, 21, 39, 12, 17, 27, 13, 18, 28, 15, 20, 14, 19,
-    2, 4, 6, 8, 10, 11, 26, 36, 47, 22, 32, 40, 23, 33, 41, 25, 35, 24, 34,
+    # Keep the dataset joint order and drop the ten mimic/locked channels. This
+    # matches the active38 ordering used by the dataset's norm_stats.json.
+    *range(29),
+    32, 33, 34, 35, 36, 39, 40, 41, 47,
 )
 
 

@@ -49,4 +49,6 @@ def test_bench2dex_inputs_select_active_38d_actions():
     assert output["state"].shape == (38,)
     assert output["actions"].shape == (50, 38)
     np.testing.assert_array_equal(output["state"][0], 0.0)
-    np.testing.assert_array_equal(output["state"][8], 39.0)
+    np.testing.assert_array_equal(output["state"][8], 8.0)
+    np.testing.assert_array_equal(output["state"][29], 32.0)
+    np.testing.assert_array_equal(output["state"][-1], 47.0)

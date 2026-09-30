@@ -165,3 +165,5 @@ openpi这个代码的Config记录很有问题，每一个Train-Infer必须成对
 ## version 0.3.1 fix 
 
 - [] bench2dex 力触觉注入（encoder的输入维度自适应）
+
+- [] client 侧控制full-active 映射

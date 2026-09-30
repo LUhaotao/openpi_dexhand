@@ -26,3 +26,6 @@
 [submodule "third_party/fact"]
 	path = third_party/fact
 	url = https://github.com/stanford-iprl-lab/fact.git
+[submodule "third_party/Bench2Dex"]
+	path = third_party/Bench2Dex
+	url = https://github.com/Yenomal/Bench2Dex
