@@ -93,6 +93,9 @@ class Observation(Generic[ArrayT]):
     image_masks: dict[str, at.Bool[ArrayT, "*b"]]
     # Low-dimensional robot state.
     state: at.Float[ArrayT, "*b s"]
+    # Optional low-dimensional torque/effort input and history.
+    torque: at.Float[ArrayT, "*b td"] | None = None
+    torque_history: at.Float[ArrayT, "*b th td"] | None = None
 
     # Optional left/right GelSight marker coordinates.
     tactile_left_marker: at.Float[ArrayT, "*b 2 63 2"] | None = None
@@ -129,6 +132,8 @@ class Observation(Generic[ArrayT]):
             images=data["image"],
             image_masks=data["image_mask"],
             state=data["state"],
+            torque=data.get("torque"),
+            torque_history=data.get("torque_history"),
             tactile_left_marker=data.get("tactile_left_marker"),
             tactile_right_marker=data.get("tactile_right_marker"),
             tactile_left_marker_history=data.get("tactile_left_marker_history"),
@@ -217,6 +222,8 @@ def preprocess_observation(
         images=out_images,
         image_masks=out_masks,
         state=observation.state,
+        torque=observation.torque,
+        torque_history=observation.torque_history,
         tactile_left_marker=observation.tactile_left_marker,
         tactile_right_marker=observation.tactile_right_marker,
         tactile_left_marker_history=observation.tactile_left_marker_history,

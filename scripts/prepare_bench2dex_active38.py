@@ -210,7 +210,7 @@ def prepare(source_dir: Path, output_dir: Path, map_path: Path, *, overwrite: bo
     )
 
     total_frames = 0
-    stats = {"state": normalize.RunningStats(), "actions": normalize.RunningStats()}
+    stats = {"state": normalize.RunningStats(), "torque": normalize.RunningStats(), "actions": normalize.RunningStats()}
     for episode_number, episode_path in enumerate(episodes):
         with h5py.File(episode_path, "r") as ep:
             episode_robot_key = _robot_key(ep)
@@ -234,9 +234,11 @@ def prepare(source_dir: Path, output_dir: Path, map_path: Path, *, overwrite: bo
             action = np.asarray(ep["action/commanded"][:], dtype=np.float32)
             instruction = _read_text(ep, "meta/instruction", episode_path.stem)
             active_state = qpos[keep][:, active_indices]
+            active_torque = qeffort[keep][:, active_indices]
             active_actions = action[keep][:, active_indices]
             for start in range(0, len(keep), 512):
                 stats["state"].update(active_state[start : start + 512])
+                stats["torque"].update(active_torque[start : start + 512])
                 stats["actions"].update(active_actions[start : start + 512])
             for source_index in keep:
                 i = int(source_index)

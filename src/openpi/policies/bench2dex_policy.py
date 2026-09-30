@@ -39,6 +39,7 @@ class Bench2DexInputs(transforms.DataTransformFn):
     state_dim: int = 48
     action_dim: int = 48
     use_active_dof: bool = False
+    include_torque: bool = False
     expected_cameras: ClassVar[tuple[str, ...]] = BENCH2DEX_CAMERAS
 
     def __post_init__(self) -> None:
@@ -63,6 +64,15 @@ class Bench2DexInputs(transforms.DataTransformFn):
             "image_mask": dict.fromkeys(output_images, np.True_),
             "state": _select_dof(data["state"], self.state_dim, self.use_active_dof, "state"),
         }
+        if self.include_torque:
+            if "torque" not in data:
+                raise KeyError("Bench2Dex torque input is required")
+            torque = _select_dof(data["torque"], self.state_dim, self.use_active_dof, "torque")
+            if torque.ndim > 1:
+                output["torque_history"] = torque
+                output["torque"] = torque[-1]
+            else:
+                output["torque"] = torque
         if "actions" in data:
             output["actions"] = _select_dof(data["actions"], self.action_dim, self.use_active_dof, "actions")
         if "prompt" in data:

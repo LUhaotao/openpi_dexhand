@@ -47,7 +47,7 @@ class Pi0Config(_model.BaseModelConfig):
     streaming: bool = False
     streaming_chunk_size: int = 5
     streaming_attention_mode: Literal[
-        "mask", "causal", "bidirectional", "tactile_attention_gate", "learnable_gate"
+        "mask", "causal", "bidirectional", "tactile_attention_gate", "torque_attention_gate", "learnable_gate"
     ] = "bidirectional"
     streaming_constant_weight: float = 0.2
     streaming_chunk_wise_weight: float = 0.8
@@ -56,6 +56,9 @@ class Pi0Config(_model.BaseModelConfig):
     # streaming_chunk_size. A value of 0 disables the augmentation.
     observation_delay_max_chunks: int = 0
     use_tactile: bool = False
+    use_torque: bool = False
+    torque_dim: int = 0
+    torque_norm_scale: float = 1.0
     use_tactile_adarms: bool = False
     tactile_history_length: int = 10
     # This config option is not used directly by the model, but it is read by the ModelTransformFactory.
@@ -85,22 +88,29 @@ class Pi0Config(_model.BaseModelConfig):
             "causal",
             "bidirectional",
             "tactile_attention_gate",
+            "torque_attention_gate",
             "learnable_gate",
         ):
             raise ValueError(
                 "streaming_attention_mode must be one of: mask, causal, bidirectional, "
-                "tactile_attention_gate, learnable_gate"
+                "tactile_attention_gate, torque_attention_gate, learnable_gate"
             )
         if self.use_tactile and not self.pi05:
             raise ValueError("use_tactile requires pi05=True")
+        if self.use_torque and (not self.pi05 or self.torque_dim < 1):
+            raise ValueError("use_torque requires pi05=True and torque_dim > 0")
+        if self.torque_norm_scale <= 0:
+            raise ValueError("torque_norm_scale must be positive")
         if self.use_tactile_adarms and not self.use_tactile:
             raise ValueError("use_tactile_adarms requires use_tactile=True")
         if self.tactile_history_length < 1:
             raise ValueError("tactile_history_length must be positive")
-        if self.streaming_attention_mode in ("tactile_attention_gate", "learnable_gate") and not self.streaming:
+        if self.streaming_attention_mode in ("tactile_attention_gate", "torque_attention_gate", "learnable_gate") and not self.streaming:
             raise ValueError(f"{self.streaming_attention_mode} requires streaming=True")
         if self.streaming_attention_mode == "tactile_attention_gate" and not self.use_tactile:
             raise ValueError("tactile_attention_gate requires use_tactile=True")
+        if self.streaming_attention_mode == "torque_attention_gate" and not self.use_torque:
+            raise ValueError("torque_attention_gate requires use_torque=True")
         if any(
             weight < 0
             for weight in (
@@ -146,6 +156,12 @@ class Pi0Config(_model.BaseModelConfig):
         marker_history_spec = jax.ShapeDtypeStruct(
             [batch_size, self.tactile_history_length, *TACTILE_MARKER_SHAPE], jnp.float32
         )
+        torque_spec = jax.ShapeDtypeStruct([batch_size, self.torque_dim], jnp.float32) if self.use_torque else None
+        torque_history_spec = (
+            jax.ShapeDtypeStruct([batch_size, self.tactile_history_length, self.torque_dim], jnp.float32)
+            if self.streaming_attention_mode == "torque_attention_gate"
+            else None
+        )
 
         with at.disable_typechecking():
             observation_spec = _model.Observation(
@@ -160,6 +176,8 @@ class Pi0Config(_model.BaseModelConfig):
                     "right_wrist_0_rgb": image_mask_spec,
                 },
                 state=jax.ShapeDtypeStruct([batch_size, self.action_dim], jnp.float32),
+                torque=torque_spec,
+                torque_history=torque_history_spec,
                 tactile_left_marker=marker_spec if self.use_tactile else None,
                 tactile_right_marker=marker_spec if self.use_tactile else None,
                 tactile_left_marker_history=(

@@ -218,6 +218,8 @@ def create_torch_dataset(
         _add_observation_delay_timestamps(delta_timestamps, data_config, dataset_meta, model_config)
         if getattr(model_config, "streaming_attention_mode", None) == "tactile_attention_gate":
             _add_tactile_history_timestamps(delta_timestamps, data_config, dataset_meta, model_config)
+        if getattr(model_config, "streaming_attention_mode", None) == "torque_attention_gate":
+            _add_torque_history_timestamps(delta_timestamps, data_config, dataset_meta, model_config)
 
     dataset = lerobot_dataset.LeRobotDataset(
         data_config.repo_id,
@@ -265,6 +267,16 @@ def _add_tactile_history_timestamps(
         if len(sources) != 1 or sources[0] not in dataset_meta.features:
             raise ValueError(f"Tactile attention gating requires exactly one valid dataset source for {destination!r}.")
         delta_timestamps[sources[0]] = timestamps
+
+
+def _add_torque_history_timestamps(delta_timestamps, data_config, dataset_meta, model_config) -> None:
+    history_length = int(getattr(model_config, "tactile_history_length", 0))
+    if history_length < 1:
+        raise ValueError("tactile_history_length must be positive for torque attention gating")
+    sources = _repack_source_keys(data_config, "torque")
+    if len(sources) != 1 or sources[0] not in dataset_meta.features:
+        raise ValueError("torque_attention_gate requires one valid torque source in the dataset.")
+    delta_timestamps[sources[0]] = [offset / dataset_meta.fps for offset in range(-(history_length - 1), 1)]
 
 
 def _observation_delay_settings(model_config: _model.BaseModelConfig) -> tuple[int, int, bool]:
@@ -424,8 +436,10 @@ def create_data_loader(
         skip_norm_stats: Whether to skip data normalization.
         framework: The framework to use ("jax" or "pytorch").
     """
-    if framework == "pytorch" and getattr(config.model, "streaming_attention_mode", None) == "tactile_attention_gate":
-        raise ValueError("tactile_attention_gate is implemented only for the JAX training path")
+    if framework == "pytorch" and getattr(config.model, "streaming_attention_mode", None) in (
+        "tactile_attention_gate", "torque_attention_gate"
+    ):
+        raise ValueError("attention gates are implemented only for the JAX training path")
     data_config = config.data.create(config.assets_dirs, config.model)
     logging.info(f"data_config: {data_config}")
 

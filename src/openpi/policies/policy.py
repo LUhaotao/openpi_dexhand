@@ -66,6 +66,7 @@ class Policy(BasePolicy):
             else 0
         )
         self._tactile_histories: dict[str, tuple[deque, deque]] = {}
+        self._torque_histories: dict[str, deque] = {}
         self._tactile_history_lock = threading.Lock()
 
         if self._is_pytorch_model:
@@ -98,8 +99,23 @@ class Policy(BasePolicy):
         inputs = self._input_transform(inputs)
         if self._tactile_history_length and update_tactile_history:
             self._attach_tactile_history(inputs, session_id)
+        if getattr(getattr(self, "_model", None), "streaming_attention_mode", None) == "torque_attention_gate":
+            self._attach_torque_history(inputs, session_id)
         inputs = jax.tree.map(lambda x: jnp.asarray(x)[np.newaxis, ...], inputs)
         return _model.Observation.from_dict(inputs)
+
+    def _attach_torque_history(self, inputs: dict, session_id: str) -> None:
+        if "torque_history" in inputs:
+            return
+        if "torque" not in inputs:
+            raise ValueError("torque_attention_gate requires torque")
+        length = int(self._model.tactile_history_length)
+        history = self._torque_histories.setdefault(session_id, deque(maxlen=length))
+        torque = np.asarray(inputs["torque"], dtype=np.float32)
+        history.append(torque)
+        while len(history) < length:
+            history.appendleft(torque)
+        inputs["torque_history"] = np.stack(tuple(history), axis=0)
 
     def _attach_tactile_history(self, inputs: dict, session_id: str) -> None:
         left_key = "tactile_left_marker"
@@ -140,6 +156,7 @@ class Policy(BasePolicy):
     def reset_tactile_history(self, session_id: str) -> None:
         with self._tactile_history_lock:
             self._tactile_histories.pop(session_id, None)
+            getattr(self, "_torque_histories", {}).pop(session_id, None)
 
     @property
     def tactile_history_enabled(self) -> bool:

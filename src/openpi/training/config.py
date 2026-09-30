@@ -75,6 +75,16 @@ class Bench2DexPi05Config(pi0_config.Pi0Config):
                 images=dict.fromkeys(self.image_keys, image_spec),
                 image_masks=dict.fromkeys(self.image_keys, image_mask_spec),
                 state=jax.ShapeDtypeStruct([batch_size, self.action_dim], jnp.float32),
+                torque=(
+                    jax.ShapeDtypeStruct([batch_size, self.torque_dim], jnp.float32)
+                    if self.use_torque
+                    else None
+                ),
+                torque_history=(
+                    jax.ShapeDtypeStruct([batch_size, self.tactile_history_length, self.torque_dim], jnp.float32)
+                    if self.streaming_attention_mode == "torque_attention_gate"
+                    else None
+                ),
                 tokenized_prompt=jax.ShapeDtypeStruct([batch_size, self.max_token_len], jnp.int32),
                 tokenized_prompt_mask=jax.ShapeDtypeStruct([batch_size, self.max_token_len], bool),
             )
@@ -519,6 +529,7 @@ class Bench2DexDataConfig(DataConfigFactory):
                             "wrist_right": "observation.images.wrist_right",
                         },
                         "state": "observation.state",
+                        "torque": "observation.torque",
                         "actions": "action",
                         "prompt": "prompt",
                     }
@@ -544,6 +555,7 @@ class Bench2DexDataConfig(DataConfigFactory):
                         state_dim=self.state_dim,
                         action_dim=self.action_dim,
                         use_active_dof=self.use_active_dof,
+                        include_torque=getattr(model_config, "use_torque", False),
                     )
                 ],
                 outputs=[bench2dex_policy.Bench2DexOutputs(action_dim=self.action_dim)],
@@ -2428,6 +2440,10 @@ _CONFIGS = [
             action_dim=38,
             action_horizon=50,
             max_token_len=280,
+            streaming=True,
+            streaming_attention_mode="torque_attention_gate",
+            use_torque=True,
+            torque_dim=38,
         ),
         data=Bench2DexDataConfig(
             repo_id="/public/node01/users/lvrui/datasets/lerobot/bench2dex/34_fridge_wine_interhand_pour_active38",

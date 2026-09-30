@@ -93,7 +93,7 @@ def make_attn_mask(input_mask, mask_ar):
 
 def _action_ar_mask(action_horizon: int, chunk_size: int, mode: str = "causal") -> list[bool]:
     """Make action-block boundaries for the selected inter-chunk attention mode."""
-    if mode in ("mask", "bidirectional", "tactile_attention_gate", "learnable_gate"):
+    if mode in ("mask", "bidirectional", "tactile_attention_gate", "torque_attention_gate", "learnable_gate"):
         return [index == 0 for index in range(action_horizon)]
     return [index % chunk_size == 0 for index in range(action_horizon)]
 
@@ -166,6 +166,9 @@ class Pi0(_model.BaseModel):
         self.streaming_token_wise_weight = config.streaming_token_wise_weight
         self._gate_log_exp_name: str | None = None
         self.use_tactile = config.use_tactile
+        self.use_torque = config.use_torque
+        self.torque_dim = config.torque_dim
+        self.torque_norm_scale = config.torque_norm_scale
         self.use_tactile_adarms = config.use_tactile_adarms
         self.tactile_history_length = config.tactile_history_length
         paligemma_config = _gemma.get_config(config.paligemma_variant)
@@ -202,7 +205,10 @@ class Pi0(_model.BaseModel):
                 self.marker_mlp_in = nnx.Linear(pi0_config.TACTILE_MARKER_INPUT_DIM, 512, rngs=rngs)
                 self.marker_mlp_out = nnx.Linear(512, action_expert_config.width, rngs=rngs)
                 self.marker_fusion = nnx.Linear(2 * action_expert_config.width, action_expert_config.width, rngs=rngs)
-            if config.streaming_attention_mode == "tactile_attention_gate":
+            if self.use_torque:
+                self.torque_mlp_in = nnx.Linear(self.torque_dim, 512, rngs=rngs)
+                self.torque_mlp_out = nnx.Linear(512, action_expert_config.width, rngs=rngs)
+            if config.streaming_attention_mode in ("tactile_attention_gate", "torque_attention_gate"):
                 self.tactile_position_dim = 32
                 self.tactile_tcn_width = 256
                 self.tactile_tcn_in = nnx.Linear(
@@ -277,6 +283,10 @@ class Pi0(_model.BaseModel):
         right_embedding = self._encode_marker_frames(obs.tactile_right_marker)
         return self.marker_fusion(jnp.concatenate([left_embedding, right_embedding], axis=-1))
 
+    def _encode_torque(self, torque: at.Float[at.Array, "*b td"]) -> at.Float[at.Array, "*b emb"]:
+        torque = jnp.asarray(torque) / jnp.asarray(self.torque_norm_scale, dtype=torque.dtype)
+        return self.torque_mlp_out(jax.nn.gelu(self.torque_mlp_in(torque)))
+
     def _encode_marker_frames(self, marker: at.Float[at.Array, "*b 2 63 2"]) -> at.Float[at.Array, "*b emb"]:
         marker = marker / jnp.asarray((320.0, 240.0), dtype=marker.dtype)
         marker = marker.reshape((*marker.shape[:-3], -1))
@@ -301,7 +311,27 @@ class Pi0(_model.BaseModel):
     def _attention_log_gates(self, obs: _model.Observation) -> at.Float[at.Array, "b k"] | None:
         if self.streaming_attention_mode == "tactile_attention_gate":
             return self._tactile_attention_log_gates(obs)
+        if self.streaming_attention_mode == "torque_attention_gate":
+            return self._torque_attention_log_gates_from_history(obs.torque_history)
         return self._learnable_attention_log_gates(obs.state.shape[0])
+
+    def _torque_attention_log_gates_from_history(self, torque_history):
+        if torque_history is None:
+            raise ValueError("torque_attention_gate requires torque_history")
+        if torque_history.shape[-1] != self.torque_dim:
+            raise ValueError(f"Expected torque history width {self.torque_dim}, got {torque_history.shape[-1]}")
+        torque = self._encode_torque(torque_history)
+        batch_size, history_length, _ = torque.shape
+        chunk_count = self.action_horizon // self.streaming_chunk_size
+        chunk_positions = (jnp.arange(chunk_count, dtype=jnp.float32) + 0.5) / chunk_count
+        position = posemb_sincos(chunk_positions, self.tactile_position_dim, min_period=0.01, max_period=1.0)
+        position = jnp.broadcast_to(position[None, :, None, :], (batch_size, chunk_count, history_length, self.tactile_position_dim))
+        torque = jnp.broadcast_to(torque[:, None, :, :], (batch_size, chunk_count, history_length, torque.shape[-1]))
+        x = jnp.concatenate([torque, position], axis=-1).reshape(batch_size * chunk_count, history_length, torque.shape[-1] + self.tactile_position_dim)
+        x = jax.nn.gelu(self.tactile_tcn_in(x))
+        x = jax.nn.gelu(x + self.tactile_tcn_1(self._causal_conv_inputs(x, dilation=1)))
+        x = jax.nn.gelu(x + self.tactile_tcn_2(self._causal_conv_inputs(x, dilation=2)))
+        return jax.nn.log_sigmoid(self.tactile_gate_out(x[:, -1, :]).reshape(batch_size, chunk_count))
 
     def _tactile_attention_log_gates_from_history(
         self,
@@ -654,6 +684,7 @@ class Pi0(_model.BaseModel):
         tactile_condition: at.Float[at.Array, "b emb"] | None = None,
         tactile_left_marker_history: at.Float[at.Array, "b th 2 63 2"] | None = None,
         tactile_right_marker_history: at.Float[at.Array, "b th 2 63 2"] | None = None,
+        torque_history: at.Float[at.Array, "b th td"] | None = None,
     ) -> _model.Actions:
         """Run flow matching using a prefix KV cache produced by ``encode_prefix``."""
         if getattr(self, "use_tactile_adarms", False) and tactile_condition is None:
@@ -663,6 +694,8 @@ class Pi0(_model.BaseModel):
             attention_log_gates = self._tactile_attention_log_gates_from_history(
                 tactile_left_marker_history, tactile_right_marker_history
             )
+        elif self.streaming_attention_mode == "torque_attention_gate":
+            attention_log_gates = self._torque_attention_log_gates_from_history(torque_history)
         elif self.streaming_attention_mode == "learnable_gate":
             attention_log_gates = self._learnable_attention_log_gates(batch_size)
         else:
@@ -704,6 +737,7 @@ class Pi0(_model.BaseModel):
         tactile_condition: at.Float[at.Array, "b emb"] | None = None,
         tactile_left_marker_history: at.Float[at.Array, "b th 2 63 2"] | None = None,
         tactile_right_marker_history: at.Float[at.Array, "b th 2 63 2"] | None = None,
+        torque_history: at.Float[at.Array, "b th td"] | None = None,
     ) -> _model.Actions:
         """Advance a token-wise diffusion-forcing window by completed action chunks."""
         if not self.streaming:
@@ -715,6 +749,8 @@ class Pi0(_model.BaseModel):
             attention_log_gates = self._tactile_attention_log_gates_from_history(
                 tactile_left_marker_history, tactile_right_marker_history
             )
+        elif attention_mode == "torque_attention_gate":
+            attention_log_gates = self._torque_attention_log_gates_from_history(torque_history)
         elif attention_mode == "learnable_gate":
             attention_log_gates = self._learnable_attention_log_gates(state.shape[0])
         else:
