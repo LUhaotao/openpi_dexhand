@@ -1,6 +1,7 @@
 from pathlib import Path
 
 from openpi.policies.policy_config import _find_checkpoint_norm_stats_dir
+from openpi.policies.policy_config import _output_norm_stats
 
 
 def test_find_checkpoint_norm_stats_dir_falls_back_to_unique_asset(tmp_path: Path):
@@ -27,3 +28,14 @@ def test_find_checkpoint_norm_stats_dir_uses_root_asset(tmp_path: Path):
     )
 
     assert result == expected
+
+
+def test_output_norm_stats_excludes_history_only_statistics():
+    stats = {
+        "state": object(),
+        "actions": object(),
+        "state_history": object(),
+        "torque_history": object(),
+    }
+
+    assert _output_norm_stats(stats) == {"state": stats["state"], "actions": stats["actions"]}
