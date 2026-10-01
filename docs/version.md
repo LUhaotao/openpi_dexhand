@@ -165,3 +165,13 @@ openpi这个代码的Config记录很有问题，每一个Train-Infer必须成对
 - [*] bench2dex 力触觉注入（encoder的输入维度自适应），状态gate
 
 - [*] client 侧控制full-active 映射
+
+## 整理项目
+
+- [*] vlm冻结训练
+
+- [] 项目梳理
+
+- [] ema
+
+- [*] submodule

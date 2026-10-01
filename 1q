@@ -1,0 +1,85 @@
+approval_policy = "on-request"
+approvals_reviewer = "user"
+disable_response_storage = true
+model = "gpt-6-sol"
+model_auto_compact_token_limit = 900000
+model_context_window = 1000000
+model_provider = "OpenAI"
+model_reasoning_effort = "high"
+network_access = "enabled"
+review_model = "gpt-5.4"
+sandbox_mode = "workspace-write"
+windows_wsl_setup_acknowledged = true
+personality = "pragmatic"
+
+[features]
+multi_agent = true
+collaboration_modes = true
+
+[model_providers.OpenAI]
+base_url = "http://127.0.0.1:65535/v1"
+name = "OpenAI"
+requires_openai_auth = false
+wire_api = "responses"
+experimental_bearer_token = "6d0bd9349d2b910c77248fe79d5aba349c2ccedca538cbfb2bd6779c4539927f"
+
+[projects."/home/luohy"]
+trust_level = "trusted"
+
+[projects."/usr/local/lib/node_modules/@openai/codex"]
+trust_level = "trusted"
+
+[projects."/root"]
+trust_level = "trusted"
+
+[projects."/root/dex_teleop_ws/egocollect"]
+trust_level = "trusted"
+
+[projects."/root/robot_infra_ws"]
+trust_level = "trusted"
+
+[projects."/"]
+trust_level = "trusted"
+
+[projects."/data"]
+trust_level = "trusted"
+
+[projects."/root/dex_teleop_ws/robot_control_ws/teleop"]
+trust_level = "trusted"
+
+[projects."/data/Robot_Lab"]
+trust_level = "trusted"
+
+[projects."/data/Robot_Lab/policy/openpi_dexhand"]
+trust_level = "trusted"
+
+[projects."/root/.codex"]
+trust_level = "trusted"
+
+[projects."/data/UniVTAC"]
+trust_level = "trusted"
+
+[projects."/data/Bench2Dex"]
+trust_level = "trusted"
+
+[tui]
+screen_reader_detection_done = true
+
+[tui.model_availability_nux]
+"gpt-5.5" = 4
+"gpt-5.6-sol" = 4
+
+[plugins."superpowers@openai-curated"]
+enabled = true
+
+[plugins."superpowers@openai-api-curated"]
+enabled = true
+
+[notice]
+hide_full_access_warning = true
+
+[notice.model_migrations]
+"gpt-5.6-sol" = "gpt-6-sol"
+
+[hooks.state]
+

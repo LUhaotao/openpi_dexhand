@@ -28,6 +28,7 @@ import openpi.policies.franka_xhand_policy as franka_xhand_policy
 import openpi.policies.libero_policy as libero_policy
 from openpi.shared import array_typing as at
 import openpi.shared.download as _download
+import openpi.shared.nnx_utils as nnx_utils
 import openpi.shared.normalize as _normalize
 import openpi.training.droid_rlds_dataset as droid_rlds_dataset
 import openpi.training.misc.roboarena_config as roboarena_config
@@ -38,6 +39,22 @@ import openpi.transforms as _transforms
 ModelType: TypeAlias = _model.ModelType
 # Work around a tyro issue with using nnx.filterlib.Filter directly.
 Filter: TypeAlias = nnx.filterlib.Filter
+
+# JAX Pi0.5 parameter paths: the action expert lives under PaliGemma/llm too,
+# with an _1 suffix on its module names. Keep that expert trainable.
+_VLM_FREEZE_FILTER = nnx.Any(
+    nnx_utils.PathRegex(r"PaliGemma/img/.*"),
+    nnx.All(
+        nnx_utils.PathRegex(r"PaliGemma/llm/.*"),
+        nnx.Not(nnx_utils.PathRegex(r"PaliGemma/llm/.*_1(?:/.*)?")),
+    ),
+    nnx_utils.PathRegex(
+        r"(?:marker_mlp_(?:in|out)|marker_fusion|torque_mlp_(?:in|out)|state_proj|state_gate_proj|"
+        r"tactile_tcn_(?:in|1|2)|tactile_gate_out|state_gate_tcn_(?:in|1|2)|state_gate_out|"
+        r"gate_fusion|gate_tcn_(?:in|1|2)|gate_out)/.*"
+    ),
+    nnx_utils.PathRegex(r"learnable_gate_logit"),
+)
 
 
 def _parse_save_steps(args: list[str]) -> tuple[int, ...]:
@@ -779,6 +796,8 @@ class TrainConfig:
 
     # Specifies which weights should be frozen.
     freeze_filter: tyro.conf.Suppress[Filter] = dataclasses.field(default_factory=nnx.Nothing)
+    # JAX Pi0.5 training: freeze the VLM and observation encoders, while training the action side.
+    freeze_vlm: bool = False
 
     # Determines the data to be trained on.
     data: DataConfigFactory = dataclasses.field(default_factory=FakeDataConfig)
@@ -838,45 +857,36 @@ class TrainConfig:
         return (pathlib.Path(self.checkpoint_base_dir) / self.name / self.exp_name).resolve()
 
     @property
+    def effective_freeze_filter(self) -> nnx.filterlib.Filter:
+        """Combine the optional VLM freeze with the existing explicit freeze filter."""
+        return nnx.Any(self.freeze_filter, _VLM_FREEZE_FILTER) if self.freeze_vlm else self.freeze_filter
+
+    @property
     def trainable_filter(self) -> nnx.filterlib.Filter:
         """Get the filter for the trainable parameters."""
-        return nnx.All(nnx.Param, nnx.Not(self.freeze_filter))
+        return nnx.All(nnx.Param, nnx.Not(self.effective_freeze_filter))
 
     def __post_init__(self) -> None:
         if self.resume and self.overwrite:
             raise ValueError("Cannot resume and overwrite at the same time.")
         if any(step <= 0 for step in self.save_steps):
             raise ValueError("save_steps must contain positive train-state steps.")
+        if self.freeze_vlm and not (isinstance(self.model, pi0_config.Pi0Config) and self.model.pi05):
+            raise ValueError("freeze_vlm is only supported for JAX Pi0.5 training.")
 
 
 def make_univtac_config(
     dataset_name: str,
     *,
     use_tactile: bool = False,
-    streaming: bool = False,
-    streaming_attention_mode: Literal[
-        "mask", "causal", "bidirectional", "attention_gate", "tactile_attention_gate", "torque_attention_gate", "state_attention_gate", "learnable_gate"
-    ] = "bidirectional",
-    gate_sources: tuple[str, ...] = (),
-    gate_history_length: int = 10,
-    use_tactile_adarms: bool = False,
-    tactile_history_length: int = 10,
 ) -> TrainConfig:
-    dataset_dir = f"/public/node01/users/lvrui/datasets/lerobot/univtac/{dataset_name}"
+    dataset_dir = f"/data/datasets/univtac/{dataset_name}"
     name = f"pi05_UniVTAC_{dataset_name}{'_tactile' if use_tactile else ''}"
-    if streaming:
-        name += f"_streaming_{streaming_attention_mode}"
     return TrainConfig(
         name=name,
         model=pi0_config.Pi0Config(
             pi05=True,
             use_tactile=use_tactile,
-            streaming=streaming,
-            streaming_attention_mode=streaming_attention_mode,
-            gate_sources=gate_sources,
-            gate_history_length=gate_history_length,
-            use_tactile_adarms=use_tactile_adarms,
-            tactile_history_length=tactile_history_length,
         ),
         data=LeRobotUniVTACDataConfig(
             repo_id=dataset_dir,
@@ -2371,23 +2381,6 @@ _CONFIGS = [
     make_univtac_config("lift_can", use_tactile=True),
     make_univtac_config("pull_out_key", use_tactile=True),
     make_univtac_config("put_bottle_in_shelf", use_tactile=True),
-    make_univtac_config(
-        "insert_HDMI",
-        use_tactile=True,
-        streaming=True,
-        streaming_attention_mode="tactile_attention_gate",
-        use_tactile_adarms=False,
-    ),
-    make_univtac_config(
-        "insert_HDMI",
-        streaming=True,
-        streaming_attention_mode="learnable_gate",
-    ),
-    make_univtac_config(
-        "insert_HDMI",
-        streaming=True,
-        streaming_attention_mode="state_attention_gate",
-    ),
 
     TrainConfig(
         # This config is for fine-tuning pi05-DROID on a custom (smaller) DROID dataset.
@@ -2429,26 +2422,26 @@ _CONFIGS = [
     ),
     # Bench2Dex RGB/full-joint baseline. The dataset is kept at 48D so the
     # first experiment does not depend on active-DOF/mimic expansion.
-    TrainConfig(
-        name="pi05_bench2dex_fridge_wine_full48",
-        model=Bench2DexPi05Config(
-            pi05=True,
-            action_dim=48,
-            action_horizon=50,
-            max_token_len=280,
-        ),
-        data=Bench2DexDataConfig(
-            repo_id="/public/node01/users/lvrui/datasets/lerobot/bench2dex/34_fridge_wine_interhand_pour",
-            assets=AssetsConfig(asset_id="bench2dex_48d"),
-        ),
-        weight_loader=weight_loaders.CheckpointWeightLoader("ckpt/pi0_ckpt/pi05_base/params"),
-        num_train_steps=2_000,
-        batch_size=32,
-        log_interval=50,
-        save_interval=1_000,
-        keep_period=1_000,
-        num_workers=32,
-    ),
+    # TrainConfig(
+    #     name="pi05_bench2dex_fridge_wine_full48",
+    #     model=Bench2DexPi05Config(
+    #         pi05=True,
+    #         action_dim=48,
+    #         action_horizon=50,
+    #         max_token_len=280,
+    #     ),
+    #     data=Bench2DexDataConfig(
+    #         repo_id="/public/node01/users/lvrui/datasets/lerobot/bench2dex/34_fridge_wine_interhand_pour",
+    #         assets=AssetsConfig(asset_id="bench2dex_48d"),
+    #     ),
+    #     weight_loader=weight_loaders.CheckpointWeightLoader("ckpt/pi0_ckpt/pi05_base/params"),
+    #     num_train_steps=2_000,
+    #     batch_size=32,
+    #     log_interval=50,
+    #     save_interval=1_000,
+    #     keep_period=1_000,
+    #     num_workers=32,
+    # ),
     # Bench2Dex-aligned active-DOF baseline. The official dataset directory
     # contains a 38-D norm_stats.json matching this joint layout.
     TrainConfig(
@@ -2458,10 +2451,10 @@ _CONFIGS = [
             action_dim=38,
             action_horizon=50,
             max_token_len=280,
-            streaming=True,
-            streaming_attention_mode="torque_attention_gate",
-            use_torque=True,
-            torque_dim=38,
+            # streaming=True,
+            # streaming_attention_mode="torque_attention_gate",
+            # use_torque=True,
+            # torque_dim=38,
         ),
         data=Bench2DexDataConfig(
             repo_id="/public/node01/users/lvrui/datasets/lerobot/bench2dex/34_fridge_wine_interhand_pour_active38",
