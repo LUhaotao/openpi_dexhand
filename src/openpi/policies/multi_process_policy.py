@@ -93,7 +93,7 @@ class MultiProcessPolicy:
         model = self.policy._model  # noqa: SLF001
         gate_sources = tuple(getattr(model, "gate_sources", ()))
         unified_gate = getattr(model, "streaming_attention_mode", None) == "attention_gate"
-        tactile_attention_gate = getattr(model, "streaming_attention_mode", None) == "tactile_attention_gate" or (unified_gate and "tactile" in gate_sources)
+        tactile_history_enabled = unified_gate and "tactile" in gate_sources
         observation = _model.Observation(
             images={
                 key: jnp.ones((1, *_model.IMAGE_RESOLUTION, 3), dtype=jnp.float32)
@@ -107,13 +107,13 @@ class MultiProcessPolicy:
                 else None
             ),
             torque_history=(
-                jnp.ones((1, getattr(model, "gate_history_length", model.tactile_history_length), model.torque_dim), dtype=jnp.float32)
-                if getattr(model, "streaming_attention_mode", None) == "torque_attention_gate" or (unified_gate and "torque" in gate_sources)
+                jnp.ones((1, model.gate_history_length, model.torque_dim), dtype=jnp.float32)
+                if unified_gate and "torque" in gate_sources
                 else None
             ),
             state_history=(
-                jnp.ones((1, getattr(model, "gate_history_length", model.state_history_length), model.action_dim), dtype=jnp.float32)
-                if getattr(model, "streaming_attention_mode", None) == "state_attention_gate" or (unified_gate and "state" in gate_sources)
+                jnp.ones((1, model.gate_history_length, model.action_dim), dtype=jnp.float32)
+                if unified_gate and "state" in gate_sources
                 else None
             ),
             tactile_left_marker=(
@@ -130,24 +130,24 @@ class MultiProcessPolicy:
                 jnp.ones(
                     (
                         1,
-                        model.tactile_history_length,
+                        model.gate_history_length,
                         *_pi0_config.TACTILE_MARKER_SHAPE,
                     ),
                     dtype=jnp.float32,
                 )
-                if tactile_attention_gate
+                if tactile_history_enabled
                 else None
             ),
             tactile_right_marker_history=(
                 jnp.ones(
                     (
                         1,
-                        model.tactile_history_length,
+                        model.gate_history_length,
                         *_pi0_config.TACTILE_MARKER_SHAPE,
                     ),
                     dtype=jnp.float32,
                 )
-                if tactile_attention_gate
+                if tactile_history_enabled
                 else None
             ),
             tokenized_prompt=jnp.ones((1, model.max_token_len), dtype=jnp.int32),
@@ -543,7 +543,7 @@ class MultiProcessPolicy:
             raise ValueError("noise_tokens must be in [1, action_horizon]")
         if (
             getattr(self.policy._model, "streaming_attention_mode", None)  # noqa: SLF001
-            in ("attention_gate", "tactile_attention_gate", "torque_attention_gate", "state_attention_gate")
+            == "attention_gate"
             and noise_tokens != self.policy._model.action_horizon  # noqa: SLF001
         ):
             raise ValueError("attention gates require noise_tokens == action_horizon")

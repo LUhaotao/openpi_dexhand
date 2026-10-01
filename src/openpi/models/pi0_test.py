@@ -192,12 +192,7 @@ def test_streaming_attention_mode_controls_chunk_connections():
     assert jnp.all(model._mask_action_chunks(base, 0))  # noqa: SLF001
 
 
-def test_tactile_attention_gate_config_and_initialization():
-    with pytest.raises(ValueError, match="requires streaming=True"):
-        _pi0_config.Pi0Config(pi05=True, use_tactile=True, streaming_attention_mode="tactile_attention_gate")
-    with pytest.raises(ValueError, match="requires use_tactile=True"):
-        _pi0_config.Pi0Config(pi05=True, streaming=True, streaming_attention_mode="tactile_attention_gate")
-
+def test_unified_tactile_attention_gate_config_and_initialization():
     config = _pi0_config.Pi0Config(
         pi05=True,
         use_tactile=True,
@@ -205,17 +200,18 @@ def test_tactile_attention_gate_config_and_initialization():
         streaming=True,
         action_horizon=6,
         streaming_chunk_size=2,
-        streaming_attention_mode="tactile_attention_gate",
-        tactile_history_length=3,
+        streaming_attention_mode="attention_gate",
+        gate_sources=("tactile",),
+        gate_history_length=3,
         paligemma_variant="dummy",
         action_expert_variant="dummy",
     )
     model = config.create(jax.random.key(0))
-    assert _action_ar_mask(6, 2, "tactile_attention_gate") == [True, False, False, False, False, False]
+    assert _action_ar_mask(6, 2, "attention_gate") == [True, False, False, False, False, False]
     base_mask = jnp.ones((1, 6, 6), dtype=jnp.bool_)
     assert jnp.array_equal(model._mask_action_chunks(base_mask, 0), base_mask)  # noqa: SLF001
     observation = config.fake_obs()
-    log_gates = model._tactile_attention_log_gates(observation)  # noqa: SLF001
+    log_gates = model._attention_log_gates(observation)  # noqa: SLF001
     assert log_gates.shape == (1, 3)
     assert jnp.allclose(log_gates, jnp.log(0.2))
 
@@ -253,23 +249,30 @@ def test_tactile_attention_gate_config_and_initialization():
     assert prefixed_sample.shape == (1, config.action_horizon, config.action_dim)
 
 
-def test_state_attention_gate_keeps_discrete_state_prompt():
-    with pytest.raises(ValueError, match="requires streaming=True"):
-        _pi0_config.Pi0Config(pi05=True, streaming_attention_mode="state_attention_gate")
-    with pytest.raises(ValueError, match="requires pi05=True"):
-        _pi0_config.Pi0Config(streaming=True, streaming_attention_mode="state_attention_gate")
+@pytest.mark.parametrize(
+    ("mode, extra"),
+    [
+        ("tactile_attention_gate", {"use_tactile": True}),
+        ("torque_attention_gate", {"use_torque": True, "torque_dim": 2}),
+        ("state_attention_gate", {}),
+    ],
+)
+def test_legacy_single_source_gate_modes_are_rejected(mode, extra):
+    with pytest.raises(ValueError, match="streaming_attention_mode must be one of"):
+        _pi0_config.Pi0Config(pi05=True, streaming=True, streaming_attention_mode=mode, **extra)
 
+
+def test_unified_state_attention_gate_keeps_discrete_state_prompt():
     config = _pi0_config.Pi0Config(
         pi05=True, discrete_state_input=True, streaming=True,
-        action_horizon=6, streaming_chunk_size=2, state_history_length=3,
-        streaming_attention_mode="state_attention_gate",
+        action_horizon=6, streaming_chunk_size=2, gate_history_length=3,
+        streaming_attention_mode="attention_gate", gate_sources=("state",),
         paligemma_variant="dummy", action_expert_variant="dummy",
     )
     model = config.create(jax.random.key(0))
     observation = config.fake_obs()
-    assert not hasattr(model, "state_proj")
-    assert hasattr(model, "state_gate_proj")
-    assert _action_ar_mask(6, 2, "state_attention_gate") == [True, False, False, False, False, False]
+    assert hasattr(model, "state_proj")
+    assert _action_ar_mask(6, 2, "attention_gate") == [True, False, False, False, False, False]
     log_gates = model._attention_log_gates(observation)  # noqa: SLF001
     assert log_gates.shape == (1, 3)
     assert jnp.allclose(log_gates, jnp.log(0.2))
@@ -294,7 +297,8 @@ def test_tactile_attention_gate_graphdef_is_stable_after_parameter_merge():
         streaming=True,
         action_horizon=10,
         streaming_chunk_size=5,
-        streaming_attention_mode="tactile_attention_gate",
+        streaming_attention_mode="attention_gate",
+        gate_sources=("tactile",),
         paligemma_variant="dummy",
         action_expert_variant="dummy",
     )

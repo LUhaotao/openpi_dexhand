@@ -240,20 +240,11 @@ def create_torch_dataset(
     }
     if apply_observation_delay:
         _add_observation_delay_timestamps(delta_timestamps, data_config, dataset_meta, model_config)
-        if getattr(model_config, "streaming_attention_mode", None) in ("state_attention_gate", "attention_gate") and (
-            getattr(model_config, "streaming_attention_mode", None) == "state_attention_gate"
-            or "state" in getattr(model_config, "gate_sources", ())
-        ):
+        if getattr(model_config, "streaming_attention_mode", None) == "attention_gate" and "state" in getattr(model_config, "gate_sources", ()):
             _add_state_history_timestamps(delta_timestamps, data_config, dataset_meta, model_config)
-        if getattr(model_config, "streaming_attention_mode", None) in ("tactile_attention_gate", "attention_gate") and (
-            getattr(model_config, "streaming_attention_mode", None) == "tactile_attention_gate"
-            or "tactile" in getattr(model_config, "gate_sources", ())
-        ):
+        if getattr(model_config, "streaming_attention_mode", None) == "attention_gate" and "tactile" in getattr(model_config, "gate_sources", ()):
             _add_tactile_history_timestamps(delta_timestamps, data_config, dataset_meta, model_config)
-        if getattr(model_config, "streaming_attention_mode", None) in ("torque_attention_gate", "attention_gate") and (
-            getattr(model_config, "streaming_attention_mode", None) == "torque_attention_gate"
-            or "torque" in getattr(model_config, "gate_sources", ())
-        ):
+        if getattr(model_config, "streaming_attention_mode", None) == "attention_gate" and "torque" in getattr(model_config, "gate_sources", ()):
             _add_torque_history_timestamps(delta_timestamps, data_config, dataset_meta, model_config)
 
     dataset = lerobot_dataset.LeRobotDataset(
@@ -292,13 +283,9 @@ def _add_tactile_history_timestamps(
     dataset_meta,
     model_config: _model.BaseModelConfig,
 ) -> None:
-    history_length = int(
-        model_config.gate_history_length
-        if getattr(model_config, "streaming_attention_mode", None) == "attention_gate"
-        else getattr(model_config, "tactile_history_length", 0)
-    )
+    history_length = int(model_config.gate_history_length)
     if history_length < 1:
-        raise ValueError("tactile_history_length must be positive for tactile attention gating")
+        raise ValueError("gate_history_length must be positive for tactile attention gating")
 
     timestamps = [offset / dataset_meta.fps for offset in range(-(history_length - 1), 1)]
     for destination in ("left_marker", "right_marker"):
@@ -309,28 +296,20 @@ def _add_tactile_history_timestamps(
 
 
 def _add_torque_history_timestamps(delta_timestamps, data_config, dataset_meta, model_config) -> None:
-    history_length = int(
-        model_config.gate_history_length
-        if getattr(model_config, "streaming_attention_mode", None) == "attention_gate"
-        else getattr(model_config, "tactile_history_length", 0)
-    )
+    history_length = int(model_config.gate_history_length)
     if history_length < 1:
-        raise ValueError("tactile_history_length must be positive for torque attention gating")
+        raise ValueError("gate_history_length must be positive for torque attention gating")
     sources = _repack_source_keys(data_config, "torque")
     if len(sources) != 1 or sources[0] not in dataset_meta.features:
-        raise ValueError("torque_attention_gate requires one valid torque source in the dataset.")
+        raise ValueError("attention_gate with torque requires one valid torque source in the dataset.")
     delta_timestamps[sources[0]] = [offset / dataset_meta.fps for offset in range(-(history_length - 1), 1)]
 
 
 def _add_state_history_timestamps(delta_timestamps, data_config, dataset_meta, model_config) -> None:
     sources = _repack_source_keys(data_config, "state")
     if len(sources) != 1 or sources[0] not in dataset_meta.features:
-        raise ValueError("state_attention_gate requires one valid state source in the dataset")
-    history_length = int(
-        model_config.gate_history_length
-        if getattr(model_config, "streaming_attention_mode", None) == "attention_gate"
-        else model_config.state_history_length
-    )
+        raise ValueError("attention_gate with state requires one valid state source in the dataset")
+    history_length = int(model_config.gate_history_length)
     offsets = {0}
     offsets.update(range(-(history_length - 1), 1))
     if model_config.discrete_state_input:
@@ -427,9 +406,9 @@ def transform_dataset(
             raise ValueError("model_config is required when observation delay is enabled")
         max_delay_chunks, chunk_size, discrete_state_input = _observation_delay_settings(model_config)
         state_history_length = (
-            int(getattr(model_config, "gate_history_length", model_config.state_history_length))
-            if getattr(model_config, "streaming_attention_mode", None) == "state_attention_gate"
-            or (getattr(model_config, "streaming_attention_mode", None) == "attention_gate" and "state" in getattr(model_config, "gate_sources", ()))
+            int(model_config.gate_history_length)
+            if getattr(model_config, "streaming_attention_mode", None) == "attention_gate"
+            and "state" in getattr(model_config, "gate_sources", ())
             else 0
         )
         input_transforms = (
@@ -449,8 +428,6 @@ def transform_dataset(
     else:
         input_transforms = [*data_config.repack_transforms.inputs, *data_config.data_transforms.inputs]
 
-    if getattr(model_config, "streaming_attention_mode", None) == "state_attention_gate" and "state" in norm_stats:
-        norm_stats = {**norm_stats, "state_history": norm_stats["state"]}
     if getattr(model_config, "streaming_attention_mode", None) == "attention_gate" and "state" in norm_stats:
         norm_stats = {**norm_stats, "state_history": norm_stats["state"]}
     if "torque" in norm_stats and "torque_history" not in norm_stats:

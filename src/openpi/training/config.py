@@ -49,8 +49,7 @@ _VLM_FREEZE_FILTER = nnx.Any(
         nnx.Not(nnx_utils.PathRegex(r"PaliGemma/llm/.*_1(?:/.*)?")),
     ),
     nnx_utils.PathRegex(
-        r"(?:marker_mlp_(?:in|out)|marker_fusion|torque_mlp_(?:in|out)|state_proj|state_gate_proj|"
-        r"tactile_tcn_(?:in|1|2)|tactile_gate_out|state_gate_tcn_(?:in|1|2)|state_gate_out|"
+        r"(?:marker_mlp_(?:in|out)|marker_fusion|torque_mlp_(?:in|out)|state_proj|"
         r"gate_fusion|gate_tcn_(?:in|1|2)|gate_out)/.*"
     ),
     nnx_utils.PathRegex(r"learnable_gate_logit"),
@@ -94,10 +93,9 @@ class Bench2DexPi05Config(pi0_config.Pi0Config):
                 state=jax.ShapeDtypeStruct([batch_size, self.action_dim], jnp.float32),
                 state_history=(
                     jax.ShapeDtypeStruct(
-                        [batch_size, self.gate_history_length if self.streaming_attention_mode == "attention_gate" else self.state_history_length, self.action_dim], jnp.float32
+                        [batch_size, self.gate_history_length, self.action_dim], jnp.float32
                     )
-                    if self.streaming_attention_mode == "state_attention_gate"
-                    or (self.streaming_attention_mode == "attention_gate" and "state" in self.gate_sources)
+                    if self.streaming_attention_mode == "attention_gate" and "state" in self.gate_sources
                     else None
                 ),
                 torque=(
@@ -106,9 +104,8 @@ class Bench2DexPi05Config(pi0_config.Pi0Config):
                     else None
                 ),
                 torque_history=(
-                    jax.ShapeDtypeStruct([batch_size, self.gate_history_length if self.streaming_attention_mode == "attention_gate" else self.tactile_history_length, self.torque_dim], jnp.float32)
-                    if self.streaming_attention_mode == "torque_attention_gate"
-                    or (self.streaming_attention_mode == "attention_gate" and "torque" in self.gate_sources)
+                    jax.ShapeDtypeStruct([batch_size, self.gate_history_length, self.torque_dim], jnp.float32)
+                    if self.streaming_attention_mode == "attention_gate" and "torque" in self.gate_sources
                     else None
                 ),
                 tokenized_prompt=jax.ShapeDtypeStruct([batch_size, self.max_token_len], jnp.int32),
@@ -2452,7 +2449,7 @@ _CONFIGS = [
             action_horizon=50,
             max_token_len=280,
             # streaming=True,
-            # streaming_attention_mode="torque_attention_gate",
+            # streaming_attention_mode="attention_gate",
             # use_torque=True,
             # torque_dim=38,
         ),

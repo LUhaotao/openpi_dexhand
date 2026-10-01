@@ -31,6 +31,31 @@ def test_reset_stream_can_clear_prefix_cache():
     assert policy._refresh_generation == 5
 
 
+def test_unified_gate_warmup_uses_one_history_length_for_all_sources():
+    policy = object.__new__(MultiProcessPolicy)
+    policy.role = "vlm"
+    policy.policy = SimpleNamespace(_model=SimpleNamespace(
+        action_dim=3,
+        max_token_len=4,
+        streaming_attention_mode="attention_gate",
+        gate_sources=("torque", "tactile", "state"),
+        gate_history_length=2,
+        use_torque=True,
+        torque_dim=3,
+        use_tactile=True,
+    ))
+    seen = []
+    policy._encode_prefix_jit = lambda observation: seen.append(observation)
+
+    policy.warmup()
+
+    observation = seen[0]
+    assert observation.torque_history.shape == (1, 2, 3)
+    assert observation.state_history.shape == (1, 2, 3)
+    assert observation.tactile_left_marker_history.shape[1] == 2
+    assert observation.tactile_right_marker_history.shape[1] == 2
+
+
 def test_refresh_prefix_can_wait_for_active_cache(monkeypatch):
     policy = object.__new__(MultiProcessPolicy)
     policy._cache_lock = threading.Lock()

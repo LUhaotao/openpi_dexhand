@@ -153,8 +153,9 @@ def test_tactile_history_timestamps_are_current_to_past():
         pi05=True,
         use_tactile=True,
         streaming=True,
-        streaming_attention_mode="tactile_attention_gate",
-        tactile_history_length=4,
+        streaming_attention_mode="attention_gate",
+        gate_sources=("tactile",),
+        gate_history_length=4,
     )
     delta_timestamps = {}
     dataset_meta = SimpleNamespace(
@@ -180,7 +181,7 @@ def test_state_gate_timestamps_include_history_and_delayed_prompt():
     )
     model_config = pi0_config.Pi0Config(
         pi05=True, streaming=True, action_horizon=6, streaming_chunk_size=2,
-        streaming_attention_mode="state_attention_gate", state_history_length=3,
+        streaming_attention_mode="attention_gate", gate_sources=("state",), gate_history_length=3,
         observation_delay_max_chunks=2,
     )
     timestamps = {}

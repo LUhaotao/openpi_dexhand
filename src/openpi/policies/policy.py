@@ -79,16 +79,15 @@ class Policy(BasePolicy):
         gate_sources = tuple(getattr(model, "gate_sources", ()))
         unified_gate = not is_pytorch and getattr(model, "streaming_attention_mode", None) == "attention_gate"
         self._tactile_history_length = (
-            int(model.gate_history_length if unified_gate else model.tactile_history_length)
-            if not is_pytorch
-            and (getattr(model, "streaming_attention_mode", None) == "tactile_attention_gate" or (unified_gate and "tactile" in gate_sources))
+            int(model.gate_history_length)
+            if not is_pytorch and unified_gate and "tactile" in gate_sources
             else 0
         )
         self._tactile_histories: dict[str, tuple[deque, deque]] = {}
         self._torque_histories: dict[str, deque] = {}
         self._state_history_length = (
-            int(model.gate_history_length if unified_gate else model.state_history_length)
-            if not is_pytorch and (getattr(model, "streaming_attention_mode", None) == "state_attention_gate" or (unified_gate and "state" in gate_sources))
+            int(model.gate_history_length)
+            if not is_pytorch and unified_gate and "state" in gate_sources
             else 0
         )
         self._state_histories: dict[str, deque] = {}
@@ -130,9 +129,7 @@ class Policy(BasePolicy):
             self._attach_tactile_history(inputs, session_id)
         if getattr(self, "_state_history_length", 0) and update_tactile_history:
             self._attach_state_history(inputs, session_id)
-        if getattr(getattr(self, "_model", None), "streaming_attention_mode", None) == "torque_attention_gate" or (
-            unified_gate and "torque" in gate_sources
-        ):
+        if unified_gate and "torque" in gate_sources:
             self._attach_torque_history(inputs, session_id)
         inputs = jax.tree.map(lambda x: jnp.asarray(x)[np.newaxis, ...], inputs)
         return _model.Observation.from_dict(inputs)
@@ -156,12 +153,8 @@ class Policy(BasePolicy):
         if "torque_history" in inputs:
             return
         if "torque" not in inputs:
-            raise ValueError("torque_attention_gate requires torque")
-        length = int(
-            self._model.gate_history_length
-            if getattr(self._model, "streaming_attention_mode", None) == "attention_gate"
-            else self._model.tactile_history_length
-        )
+            raise ValueError("attention_gate with torque requires torque")
+        length = int(self._model.gate_history_length)
         history = self._torque_histories.setdefault(session_id, deque(maxlen=length))
         torque = np.asarray(inputs["torque"], dtype=np.float32)
         history.append(torque)
@@ -184,7 +177,7 @@ class Policy(BasePolicy):
                     )
             return
         if left_key not in inputs or right_key not in inputs:
-            raise ValueError("tactile_attention_gate requires current left and right marker frames")
+            raise ValueError("attention_gate with tactile requires current left and right marker frames")
 
         left = np.asarray(inputs[left_key], dtype=np.float32)
         right = np.asarray(inputs[right_key], dtype=np.float32)

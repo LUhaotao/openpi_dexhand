@@ -47,7 +47,7 @@ class Pi0Config(_model.BaseModelConfig):
     streaming: bool = False
     streaming_chunk_size: int = 5
     streaming_attention_mode: Literal[
-        "mask", "causal", "bidirectional", "attention_gate", "tactile_attention_gate", "torque_attention_gate", "state_attention_gate", "learnable_gate"
+        "mask", "causal", "bidirectional", "attention_gate", "learnable_gate"
     ] = "bidirectional"
     # Inputs to the unified conditioned attention gate.  The order is part of
     # the checkpoint interface and is always torque, tactile, state.
@@ -64,8 +64,6 @@ class Pi0Config(_model.BaseModelConfig):
     torque_dim: int = 0
     torque_norm_scale: float = 1.0
     use_tactile_adarms: bool = False
-    tactile_history_length: int = 10
-    state_history_length: int = 10
     # This config option is not used directly by the model, but it is read by the ModelTransformFactory.
     discrete_state_input: bool = None  # type: ignore
 
@@ -93,14 +91,11 @@ class Pi0Config(_model.BaseModelConfig):
             "causal",
             "bidirectional",
             "attention_gate",
-            "tactile_attention_gate",
-            "torque_attention_gate",
-            "state_attention_gate",
             "learnable_gate",
         ):
             raise ValueError(
                 "streaming_attention_mode must be one of: mask, causal, bidirectional, "
-                "attention_gate, tactile_attention_gate, torque_attention_gate, state_attention_gate, learnable_gate"
+                "attention_gate, learnable_gate"
             )
         if self.gate_history_length < 1:
             raise ValueError("gate_history_length must be positive")
@@ -118,18 +113,8 @@ class Pi0Config(_model.BaseModelConfig):
             raise ValueError("torque_norm_scale must be positive")
         if self.use_tactile_adarms and not self.use_tactile:
             raise ValueError("use_tactile_adarms requires use_tactile=True")
-        if self.tactile_history_length < 1:
-            raise ValueError("tactile_history_length must be positive")
-        if self.state_history_length < 1:
-            raise ValueError("state_history_length must be positive")
-        if self.streaming_attention_mode in ("attention_gate", "tactile_attention_gate", "torque_attention_gate", "state_attention_gate", "learnable_gate") and not self.streaming:
+        if self.streaming_attention_mode in ("attention_gate", "learnable_gate") and not self.streaming:
             raise ValueError(f"{self.streaming_attention_mode} requires streaming=True")
-        if self.streaming_attention_mode == "state_attention_gate" and not self.pi05:
-            raise ValueError("state_attention_gate requires pi05=True")
-        if self.streaming_attention_mode == "tactile_attention_gate" and not self.use_tactile:
-            raise ValueError("tactile_attention_gate requires use_tactile=True")
-        if self.streaming_attention_mode == "torque_attention_gate" and not self.use_torque:
-            raise ValueError("torque_attention_gate requires use_torque=True")
         if self.streaming_attention_mode == "attention_gate":
             if "torque" in self.gate_sources and not self.use_torque:
                 raise ValueError("attention_gate with torque requires use_torque=True")
@@ -179,15 +164,15 @@ class Pi0Config(_model.BaseModelConfig):
         image_spec = jax.ShapeDtypeStruct([batch_size, *_model.IMAGE_RESOLUTION, 3], jnp.float32)
         image_mask_spec = jax.ShapeDtypeStruct([batch_size], jnp.bool_)
         marker_spec = jax.ShapeDtypeStruct([batch_size, *TACTILE_MARKER_SHAPE], jnp.float32)
-        marker_history_length = self.gate_history_length if self.streaming_attention_mode == "attention_gate" else self.tactile_history_length
+        gate_mode = self.streaming_attention_mode == "attention_gate"
+        marker_history_length = self.gate_history_length
         marker_history_spec = jax.ShapeDtypeStruct(
             [batch_size, marker_history_length, *TACTILE_MARKER_SHAPE], jnp.float32
         )
         torque_spec = jax.ShapeDtypeStruct([batch_size, self.torque_dim], jnp.float32) if self.use_torque else None
-        gate_mode = self.streaming_attention_mode == "attention_gate"
         torque_history_spec = (
-            jax.ShapeDtypeStruct([batch_size, self.gate_history_length if gate_mode else self.tactile_history_length, self.torque_dim], jnp.float32)
-            if self.streaming_attention_mode == "torque_attention_gate" or (gate_mode and "torque" in self.gate_sources)
+            jax.ShapeDtypeStruct([batch_size, self.gate_history_length, self.torque_dim], jnp.float32)
+            if gate_mode and "torque" in self.gate_sources
             else None
         )
 
@@ -206,20 +191,20 @@ class Pi0Config(_model.BaseModelConfig):
                 state=jax.ShapeDtypeStruct([batch_size, self.action_dim], jnp.float32),
                 state_history=(
                     jax.ShapeDtypeStruct(
-                        [batch_size, self.gate_history_length if gate_mode else self.state_history_length, self.action_dim],
+                        [batch_size, self.gate_history_length, self.action_dim],
                         jnp.float32,
                     )
-                    if self.streaming_attention_mode == "state_attention_gate" or (gate_mode and "state" in self.gate_sources) else None
+                    if gate_mode and "state" in self.gate_sources else None
                 ),
                 torque=torque_spec,
                 torque_history=torque_history_spec,
                 tactile_left_marker=marker_spec if self.use_tactile else None,
                 tactile_right_marker=marker_spec if self.use_tactile else None,
                 tactile_left_marker_history=(
-                    marker_history_spec if self.streaming_attention_mode == "tactile_attention_gate" or (gate_mode and "tactile" in self.gate_sources) else None
+                    marker_history_spec if gate_mode and "tactile" in self.gate_sources else None
                 ),
                 tactile_right_marker_history=(
-                    marker_history_spec if self.streaming_attention_mode == "tactile_attention_gate" or (gate_mode and "tactile" in self.gate_sources) else None
+                    marker_history_spec if gate_mode and "tactile" in self.gate_sources else None
                 ),
                 tokenized_prompt=jax.ShapeDtypeStruct([batch_size, self.max_token_len], jnp.int32),
                 tokenized_prompt_mask=jax.ShapeDtypeStruct([batch_size, self.max_token_len], bool),
