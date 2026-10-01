@@ -110,6 +110,22 @@ def test_state_history_is_buffered_per_session_and_reset():
     np.testing.assert_array_equal(restarted["state_history"].reshape(-1), [3, 3, 3])
 
 
+def test_explicit_state_history_is_not_rebuffered_or_reordered():
+    policy = object.__new__(_policy.Policy)
+    policy._state_history_length = 3
+    policy._state_histories = {}
+    policy._tactile_histories = {}
+    policy._tactile_history_lock = threading.Lock()
+
+    history = np.asarray([[1.0], [2.0], [3.0]], dtype=np.float32)
+    inputs = {"state": history[-1], "state_history": history.copy()}
+
+    policy._attach_state_history(inputs, "a")
+
+    np.testing.assert_array_equal(inputs["state"], history[-1])
+    np.testing.assert_array_equal(inputs["state_history"], history)
+
+
 def test_policy_infer_batches_a_single_frame_history_window():
     policy = object.__new__(_policy.Policy)
     policy._is_pytorch_model = False
