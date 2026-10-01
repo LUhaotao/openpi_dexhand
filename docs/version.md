@@ -172,7 +172,7 @@ openpi这个代码的Config记录很有问题，每一个Train-Infer必须成对
 
 - [*] 项目梳理-训练时 —— config-transform预处理-shard/batch分片-model-trainstate-train启动-optimizer-ckpt保存、日志保存，我们的主要改动是model-trainstate这里，对于新模态的预处理采用的都是标准的normstats，触觉用的和图像类似的归一化方案
 
-- [] 项目梳理-推理时
+- [*] 项目梳理-推理时
 
 - [*] ema：ema是JAX全量微调下的一个平滑工具，明确保存的就是ema
 
@@ -180,6 +180,6 @@ openpi这个代码的Config记录很有问题，每一个Train-Infer必须成对
 
 - [*] 推理时 state 解析
 
-- [] state反归一化
+- [*] state反归一化：为了把delta action变成abs action
 
-- [] 推理时日志
+- [*] 推理时日志

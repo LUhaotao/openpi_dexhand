@@ -5,7 +5,6 @@ import itertools
 import logging
 import pathlib
 import threading
-import time
 
 import einops
 import flax.linen as nn
@@ -30,16 +29,15 @@ _GATE_LOG_LOCK = threading.Lock()
 _GATE_PATH_INDEX = itertools.count()
 
 
-def _append_tactile_gate_log(exp_name: str, gates) -> None:
-    """Append one JAX gate evaluation to the experiment CSV on the host."""
+def _append_gate_log(exp_name: str, gates) -> None:
+    """Append one unified gate evaluation to the experiment CSV on the host."""
     import numpy as np
 
     gates = np.asarray(gates)
     if gates.ndim != 2:
-        raise ValueError(f"Expected tactile gate values with shape [batch, chunks], got {gates.shape}")
+        raise ValueError(f"Expected unified gate values with shape [batch, chunks], got {gates.shape}")
 
     path = _GATE_LOG_DIR / f"{exp_name}-gate.csv"
-    timestamp = time.time()
     with _GATE_LOG_LOCK:
         path_index = next(_GATE_PATH_INDEX)
         _GATE_LOG_DIR.mkdir(parents=True, exist_ok=True)
@@ -49,11 +47,11 @@ def _append_tactile_gate_log(exp_name: str, gates) -> None:
             write_header = file.tell() == 0
             writer = csv.writer(file)
             if write_header:
-                writer.writerow(("timestamp", "path_index", "batch_index", "chunk_index", "log_gate", "gate"))
-            for batch_index, row in enumerate(gates):
+                writer.writerow(("path_index", "chunk_index", "log_gate", "gate"))
+            for row in gates:
                 for chunk_index, value in enumerate(row):
                     log_gate = float(value)
-                    writer.writerow((timestamp, path_index, batch_index, chunk_index, log_gate, np.exp(log_gate)))
+                    writer.writerow((path_index, chunk_index, log_gate, np.exp(log_gate)))
             file.flush()
             fcntl.flock(file.fileno(), fcntl.LOCK_UN)
 
@@ -365,7 +363,7 @@ class Pi0(_model.BaseModel):
         log_gates = jax.nn.log_sigmoid(self.gate_out(x[:, -1, :]).reshape(batch_size, chunk_count))
         if self._gate_log_exp_name is not None:
             jax.debug.callback(
-                functools.partial(_append_tactile_gate_log, self._gate_log_exp_name),
+                functools.partial(_append_gate_log, self._gate_log_exp_name),
                 log_gates,
                 ordered=True,
             )

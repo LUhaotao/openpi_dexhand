@@ -1,3 +1,6 @@
+import csv
+import importlib
+import itertools
 import json
 
 import flax.nnx as nnx
@@ -14,6 +17,8 @@ from openpi.models.pi0 import _shift_streaming_window
 from openpi.models.pi0 import make_attn_mask
 from openpi.models.pi0 import posemb_sincos
 import openpi.models.pi0_config as _pi0_config
+
+_pi0 = importlib.import_module("openpi.models.pi0")
 
 
 def _get_frozen_state(config: _pi0_config.Pi0Config) -> nnx.State:
@@ -250,7 +255,7 @@ def test_unified_tactile_attention_gate_config_and_initialization():
 
 
 @pytest.mark.parametrize(
-    ("mode, extra"),
+    ("mode", "extra"),
     [
         ("tactile_attention_gate", {"use_tactile": True}),
         ("torque_attention_gate", {"use_torque": True, "torque_dim": 2}),
@@ -361,6 +366,19 @@ def test_learnable_gate_is_global_and_matches_tactile_initialization():
     )
     assert sampled.shape == (1, config.action_horizon, config.action_dim)
 
+
+def test_gate_log_omits_timestamp_and_batch_index(tmp_path, monkeypatch):
+    monkeypatch.setattr(_pi0, "_GATE_LOG_DIR", tmp_path)
+    monkeypatch.setattr(_pi0, "_GATE_PATH_INDEX", itertools.count())
+
+    _pi0._append_gate_log("experiment", np.asarray([[-1.0, -2.0], [-3.0, -4.0]]))  # noqa: SLF001
+
+    with (tmp_path / "experiment-gate.csv").open(newline="") as file:
+        rows = list(csv.reader(file))
+
+    assert rows[0] == ["path_index", "chunk_index", "log_gate", "gate"]
+    assert rows[1][0:2] == ["0", "0"]
+    assert len(rows[1]) == 4
 
 def test_streaming_attention_mode_is_validated():
     with pytest.raises(ValueError, match="streaming_attention_mode"):
