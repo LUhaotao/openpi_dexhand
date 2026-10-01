@@ -126,6 +126,17 @@ def test_explicit_state_history_is_not_rebuffered_or_reordered():
     np.testing.assert_array_equal(inputs["state_history"], history)
 
 
+def test_split_state_history_after_model_padding():
+    history = np.arange(4 * 32, dtype=np.float32).reshape(4, 32)
+
+    result = _policy._split_state_history({"state": history})
+
+    assert result["state"].shape == (32,)
+    assert result["state_history"].shape == (4, 32)
+    np.testing.assert_array_equal(result["state"], history[-1])
+    np.testing.assert_array_equal(result["state_history"], history)
+
+
 def test_policy_infer_batches_a_single_frame_history_window():
     policy = object.__new__(_policy.Policy)
     policy._is_pytorch_model = False
