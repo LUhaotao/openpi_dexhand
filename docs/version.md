@@ -183,3 +183,5 @@ openpi这个代码的Config记录很有问题，每一个Train-Infer必须成对
 - [*] state反归一化：为了把delta action变成abs action
 
 - [*] 推理时日志
+
+- [] fake env
