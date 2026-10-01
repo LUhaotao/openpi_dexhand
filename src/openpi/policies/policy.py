@@ -23,6 +23,23 @@ from openpi.shared import nnx_utils
 BasePolicy: TypeAlias = _base_policy.BasePolicy
 
 
+def _split_state_history(inputs: dict) -> dict:
+    """Normalize a wire state history into current state plus history leaves."""
+    if "state" not in inputs:
+        return inputs
+    state = np.asarray(inputs["state"])
+    if state.ndim == 1:
+        return inputs
+    if state.ndim != 2:
+        raise ValueError(f"Expected state with shape (D,) or (H, D), got {state.shape}")
+    if state.shape[0] == 0:
+        raise ValueError("state history must contain at least one frame")
+    if "state_history" not in inputs:
+        inputs["state_history"] = inputs["state"]
+    inputs["state"] = inputs["state"][-1]
+    return inputs
+
+
 class Policy(BasePolicy):
     def __init__(
         self,
@@ -105,6 +122,7 @@ class Policy(BasePolicy):
     ) -> _model.Observation:
         inputs = jax.tree.map(lambda x: x, obs)
         inputs = self._input_transform(inputs)
+        inputs = _split_state_history(inputs)
         model = getattr(self, "_model", None)
         gate_sources = tuple(getattr(model, "gate_sources", ()))
         unified_gate = getattr(model, "streaming_attention_mode", None) == "attention_gate"

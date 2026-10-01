@@ -40,3 +40,34 @@ def test_franka_inputs_preserve_marker_history_and_current_frame():
     assert result["tactile_left_marker_history"].shape == (4, *_pi0_config.TACTILE_MARKER_SHAPE)
     np.testing.assert_array_equal(result["tactile_left_marker"], history[-1])
     np.testing.assert_array_equal(result["tactile_right_marker"], history[-1] + 10)
+
+
+def test_franka_inputs_split_state_history_and_current_frame():
+    state_history = np.stack(
+        [np.full((18,), index, dtype=np.float32) for index in range(4)], axis=0
+    )
+    transform = FrankaXHandInputs()
+
+    result = transform(
+        {
+            "images": {"cam_side": np.zeros((4, 4, 3), dtype=np.uint8)},
+            "state": state_history,
+        }
+    )
+
+    assert result["state"].shape == (18,)
+    assert result["state_history"].shape == (4, 18)
+    np.testing.assert_array_equal(result["state"], state_history[-1])
+    np.testing.assert_array_equal(result["state_history"], state_history)
+
+
+def test_franka_inputs_reject_empty_state_history():
+    transform = FrankaXHandInputs()
+
+    with pytest.raises(ValueError, match="state history must contain at least one frame"):
+        transform(
+            {
+                "images": {"cam_side": np.zeros((4, 4, 3), dtype=np.uint8)},
+                "state": np.empty((0, 18), dtype=np.float32),
+            }
+        )

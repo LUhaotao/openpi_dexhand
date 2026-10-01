@@ -14,7 +14,11 @@ class FrankaXHandInputs(transforms.DataTransformFn):
 
     Expected data after repack:
     - images: cam_side and optionally cam_wrist, in CHW or HWC format
-    - state: [18] = franka absolute TCP pose [6] + xhand absolute joints [12]
+    - state: [18] or [history, 18] = franka absolute TCP pose [6] + xhand absolute joints [12]
+
+    A two-dimensional state is a chronological history. The last frame is
+    exposed as the current state and the full window is preserved as
+    ``state_history`` for attention gates.
     - actions: [horizon, 18] during training
     """
 
@@ -30,6 +34,18 @@ class FrankaXHandInputs(transforms.DataTransformFn):
         base_image = _to_hwc_uint8(in_images["cam_side"])
         wrist_image = _to_hwc_uint8(in_images["cam_wrist"]) if "cam_wrist" in in_images else np.zeros_like(base_image)
 
+        state = np.asarray(data["state"], dtype=np.float32)
+        if state.ndim == 1:
+            current_state = state
+            state_history = None
+        elif state.ndim == 2:
+            if state.shape[0] == 0:
+                raise ValueError("state history must contain at least one frame")
+            current_state = state[-1]
+            state_history = state
+        else:
+            raise ValueError(f"Expected state with shape (D,) or (H, D), got {state.shape}")
+
         inputs = {
             "image": {
                 "base_0_rgb": base_image,
@@ -41,8 +57,10 @@ class FrankaXHandInputs(transforms.DataTransformFn):
                 "left_wrist_0_rgb": np.False_,
                 "right_wrist_0_rgb": np.asarray("cam_wrist" in in_images),
             },
-            "state": np.asarray(data["state"], dtype=np.float32),
+            "state": current_state,
         }
+        if state_history is not None:
+            inputs["state_history"] = state_history
 
         has_left_marker = "left_marker" in data
         has_right_marker = "right_marker" in data

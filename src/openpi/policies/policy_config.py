@@ -46,6 +46,15 @@ def _checkpoint_exp_name(checkpoint_dir: pathlib.Path) -> str:
     return checkpoint_dir.parent.name
 
 
+def _output_norm_stats(norm_stats: dict[str, transforms.NormStats]) -> dict[str, transforms.NormStats]:
+    """Keep only statistics that can occur in policy outputs."""
+    return {
+        key: stats
+        for key, stats in norm_stats.items()
+        if key not in {"state_history", "torque_history"}
+    }
+
+
 def create_trained_policy(
     train_config: _config.TrainConfig,
     checkpoint_dir: pathlib.Path | str,
@@ -117,6 +126,8 @@ def create_trained_policy(
     if "torque" in norm_stats and "torque_history" not in norm_stats:
         norm_stats = {**norm_stats, "torque_history": norm_stats["torque"]}
 
+    output_norm_stats = _output_norm_stats(norm_stats)
+
     # Determine the device to use for PyTorch models
     if is_pytorch and pytorch_device is None:
         try:
@@ -142,7 +153,7 @@ def create_trained_policy(
         ],
         output_transforms=[
             *data_config.model_transforms.outputs,
-            transforms.Unnormalize(norm_stats, use_quantiles=data_config.use_quantile_norm),
+            transforms.Unnormalize(output_norm_stats, use_quantiles=data_config.use_quantile_norm),
             *data_config.data_transforms.outputs,
             *repack_transforms.outputs,
         ],
