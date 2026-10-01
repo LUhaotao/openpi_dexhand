@@ -53,6 +53,8 @@ class Args:
     port: int = 8000
     # Record the policy's behavior for debugging.
     record: bool = False
+    # Persist conditioned gate values to a CSV while serving.
+    save_gate_logs: bool = False
 
     # Start separate VLM and FM websocket servers. The default path is unchanged.
     multi_process: bool = False
@@ -100,15 +102,19 @@ def create_policy(args: Args) -> _policy.Policy:
     match args.policy:
         case Checkpoint():
             train_config = _multi_process_config(args, _config.get_config(args.policy.config))
-            return _policy_config.create_trained_policy(
+            policy = _policy_config.create_trained_policy(
                 train_config, args.policy.dir, default_prompt=args.default_prompt
             )
         case Default():
             checkpoint = DEFAULT_CHECKPOINT[args.env]
             train_config = _multi_process_config(args, _config.get_config(checkpoint.config))
-            return _policy_config.create_trained_policy(
+            policy = _policy_config.create_trained_policy(
                 train_config, checkpoint.dir, default_prompt=args.default_prompt
             )
+    model = getattr(policy, "_model", None)
+    if hasattr(model, "set_gate_log_enabled"):
+        model.set_gate_log_enabled(args.save_gate_logs)
+    return policy
 
 
 def _multi_process_config(args: Args, train_config: _config.TrainConfig) -> _config.TrainConfig:

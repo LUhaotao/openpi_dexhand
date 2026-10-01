@@ -255,6 +255,26 @@ def test_unified_tactile_attention_gate_config_and_initialization():
     assert prefixed_sample.shape == (1, config.action_horizon, config.action_dim)
 
 
+def test_gate_log_saving_is_controlled_by_runtime_setter(monkeypatch):
+    config = _pi0_config.Pi0Config(
+        pi05=True, use_tactile=True, streaming=True, action_horizon=6,
+        streaming_chunk_size=2, streaming_attention_mode="attention_gate",
+        gate_sources=("tactile",), gate_history_length=3,
+        paligemma_variant="dummy", action_expert_variant="dummy",
+    )
+    model = config.create(jax.random.key(0))
+    model.set_gate_log_exp_name("experiment")
+    callbacks = []
+    callback = lambda *args, **kwargs: callbacks.append((args, kwargs))
+    monkeypatch.setattr(_pi0.jax.debug, "callback", callback)
+
+    model._attention_log_gates(config.fake_obs())  # noqa: SLF001
+    assert callbacks == []
+    model.set_gate_log_enabled(True)
+    model._attention_log_gates(config.fake_obs())  # noqa: SLF001
+    assert len(callbacks) == 1
+
+
 @pytest.mark.parametrize(
     ("mode", "extra"),
     [

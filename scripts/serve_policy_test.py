@@ -43,3 +43,31 @@ def test_single_process_server_warms_up_before_serving(monkeypatch):
     serve_policy.main(serve_policy.Args())
 
     assert events == ["warmup", "server_init", "serve"]
+
+
+def test_create_policy_applies_gate_log_runtime_flag(monkeypatch):
+    class FakeModel:
+        def __init__(self):
+            self.enabled = None
+
+        def set_gate_log_enabled(self, enabled):
+            self.enabled = enabled
+
+    class FakePolicy:
+        def __init__(self):
+            self._model = FakeModel()
+
+    policy = FakePolicy()
+    monkeypatch.setattr(serve_policy, "_policy_config", type("PolicyConfig", (), {
+        "create_trained_policy": staticmethod(lambda *args, **kwargs: policy),
+    }))
+    monkeypatch.setattr(serve_policy, "_config", type("Config", (), {
+        "get_config": staticmethod(lambda name: type("TrainConfig", (), {"model": object()})()),
+    }))
+
+    result = serve_policy.create_policy(
+        serve_policy.Args(save_gate_logs=True, policy=serve_policy.Checkpoint(config="test", dir="checkpoint"))
+    )
+
+    assert result is policy
+    assert policy._model.enabled is True

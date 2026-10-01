@@ -162,6 +162,7 @@ class Pi0(_model.BaseModel):
         self.streaming_constant_weight = config.streaming_constant_weight
         self.streaming_chunk_wise_weight = config.streaming_chunk_wise_weight
         self.streaming_token_wise_weight = config.streaming_token_wise_weight
+        self._save_gate_logs = False
         self._gate_log_exp_name: str | None = None
         self.use_tactile = config.use_tactile
         self.use_torque = config.use_torque
@@ -261,6 +262,10 @@ class Pi0(_model.BaseModel):
     def set_gate_log_exp_name(self, exp_name: str | None) -> None:
         """Set the experiment name used by the host-side tactile gate logger."""
         self._gate_log_exp_name = exp_name
+
+    def set_gate_log_enabled(self, enabled: bool) -> None:
+        """Enable or disable host-side gate logging for this serving process."""
+        self._save_gate_logs = bool(enabled)
 
     @at.typecheck
     def embed_prefix(
@@ -397,7 +402,7 @@ class Pi0(_model.BaseModel):
         x = jax.nn.gelu(x + tcn_1(self._causal_conv_inputs(x, dilation=1)))
         x = jax.nn.gelu(x + tcn_2(self._causal_conv_inputs(x, dilation=2)))
         log_gates = jax.nn.log_sigmoid(gate_out(x[:, -1, :]).reshape(batch_size, chunk_count))
-        if self._gate_log_exp_name is not None:
+        if self._save_gate_logs and self._gate_log_exp_name is not None:
             jax.debug.callback(
                 functools.partial(_append_gate_log, self._gate_log_exp_name),
                 log_gates,
