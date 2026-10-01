@@ -70,6 +70,10 @@ class Pi0Config(_model.BaseModelConfig):
     pytorch_compile_mode: str | None = "max-autotune"
 
     def __post_init__(self):
+        # JSON snapshots deserialize tuple fields as lists; normalize before
+        # validating the fixed checkpoint interface order.
+        if not isinstance(self.gate_sources, tuple):
+            object.__setattr__(self, "gate_sources", tuple(self.gate_sources))
         if self.max_token_len is None:
             object.__setattr__(self, "max_token_len", 200 if self.pi05 else 48)
         if self.discrete_state_input is None:
