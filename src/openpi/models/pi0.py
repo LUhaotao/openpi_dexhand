@@ -200,8 +200,12 @@ class Pi0(_model.BaseModel):
                 self.state_proj = nnx.Linear(config.action_dim, action_expert_config.width, rngs=rngs)
             self.time_mlp_in = nnx.Linear(action_expert_config.width, action_expert_config.width, rngs=rngs)
             self.time_mlp_out = nnx.Linear(action_expert_config.width, action_expert_config.width, rngs=rngs)
-            if config.streaming_attention_mode == "attention_gate" and "state" in config.gate_sources and not hasattr(self, "state_proj"):
-                self.state_proj = nnx.Linear(config.action_dim, action_expert_config.width, rngs=rngs)
+            if (
+                config.streaming_attention_mode == "attention_gate"
+                and config.gate_sources == ("state",)
+                and self.discrete_state_input
+            ):
+                self.state_gate_proj = nnx.Linear(config.action_dim, action_expert_config.width, rngs=rngs)
             if self.use_tactile:
                 self.marker_mlp_in = nnx.Linear(pi0_config.TACTILE_MARKER_INPUT_DIM, 512, rngs=rngs)
                 self.marker_mlp_out = nnx.Linear(512, action_expert_config.width, rngs=rngs)
@@ -212,16 +216,36 @@ class Pi0(_model.BaseModel):
             if config.streaming_attention_mode == "attention_gate":
                 width = action_expert_config.width
                 source_count = len(config.gate_sources)
-                self.gate_fusion = nnx.Linear(source_count * width, width, rngs=rngs)
+                if source_count > 1:
+                    self.gate_fusion = nnx.Linear(source_count * width, width, rngs=rngs)
                 self.gate_position_dim = 32
                 self.gate_tcn_width = 256
-                self.gate_tcn_in = nnx.Linear(width + self.gate_position_dim, self.gate_tcn_width, rngs=rngs)
-                self.gate_tcn_1 = nnx.Linear(3 * self.gate_tcn_width, self.gate_tcn_width, rngs=rngs)
-                self.gate_tcn_2 = nnx.Linear(3 * self.gate_tcn_width, self.gate_tcn_width, rngs=rngs)
-                self.gate_out = nnx.Linear(
-                    self.gate_tcn_width, 1, kernel_init=nn.initializers.zeros,
-                    bias_init=_tactile_gate_bias_init, rngs=rngs,
-                )
+                if source_count == 1 and config.gate_sources == ("state",):
+                    self.state_gate_tcn_in = nnx.Linear(width + self.gate_position_dim, self.gate_tcn_width, rngs=rngs)
+                    self.state_gate_tcn_1 = nnx.Linear(3 * self.gate_tcn_width, self.gate_tcn_width, rngs=rngs)
+                    self.state_gate_tcn_2 = nnx.Linear(3 * self.gate_tcn_width, self.gate_tcn_width, rngs=rngs)
+                    self.state_gate_out = nnx.Linear(
+                        self.gate_tcn_width, 1, kernel_init=nn.initializers.zeros,
+                        bias_init=_tactile_gate_bias_init, rngs=rngs,
+                    )
+                elif source_count == 1 and config.gate_sources == ("tactile",):
+                    self.tactile_position_dim = self.gate_position_dim
+                    self.tactile_tcn_width = self.gate_tcn_width
+                    self.tactile_tcn_in = nnx.Linear(width + self.tactile_position_dim, self.tactile_tcn_width, rngs=rngs)
+                    self.tactile_tcn_1 = nnx.Linear(3 * self.tactile_tcn_width, self.tactile_tcn_width, rngs=rngs)
+                    self.tactile_tcn_2 = nnx.Linear(3 * self.tactile_tcn_width, self.tactile_tcn_width, rngs=rngs)
+                    self.tactile_gate_out = nnx.Linear(
+                        self.tactile_tcn_width, 1, kernel_init=nn.initializers.zeros,
+                        bias_init=_tactile_gate_bias_init, rngs=rngs,
+                    )
+                else:
+                    self.gate_tcn_in = nnx.Linear(width + self.gate_position_dim, self.gate_tcn_width, rngs=rngs)
+                    self.gate_tcn_1 = nnx.Linear(3 * self.gate_tcn_width, self.gate_tcn_width, rngs=rngs)
+                    self.gate_tcn_2 = nnx.Linear(3 * self.gate_tcn_width, self.gate_tcn_width, rngs=rngs)
+                    self.gate_out = nnx.Linear(
+                        self.gate_tcn_width, 1, kernel_init=nn.initializers.zeros,
+                        bias_init=_tactile_gate_bias_init, rngs=rngs,
+                    )
         else:
             self.state_proj = nnx.Linear(config.action_dim, action_expert_config.width, rngs=rngs)
             self.action_time_mlp_in = nnx.Linear(2 * action_expert_config.width, action_expert_config.width, rngs=rngs)
@@ -344,8 +368,10 @@ class Pi0(_model.BaseModel):
                     raise ValueError("attention_gate requires state_history")
                 if state_history.shape[1] != history_length:
                     raise ValueError(f"Expected state history length {history_length}, got {state_history.shape[1]}")
-                encoded.append(self.state_proj(state_history))
-        x = self.gate_fusion(jnp.concatenate(encoded, axis=-1))
+                state_encoder = self.state_gate_proj if self.gate_sources == ("state",) else self.state_proj
+                encoded.append(state_encoder(state_history))
+        legacy_single_source = len(encoded) == 1
+        x = encoded[0] if legacy_single_source else self.gate_fusion(jnp.concatenate(encoded, axis=-1))
         batch_size = x.shape[0]
         chunk_count = self.action_horizon // self.streaming_chunk_size
         position = posemb_sincos(
@@ -357,10 +383,20 @@ class Pi0(_model.BaseModel):
         x = jnp.concatenate([x, position], axis=-1).transpose(0, 2, 1, 3).reshape(
             batch_size * chunk_count, history_length, x.shape[-1] + self.gate_position_dim
         )
-        x = jax.nn.gelu(self.gate_tcn_in(x))
-        x = jax.nn.gelu(x + self.gate_tcn_1(self._causal_conv_inputs(x, dilation=1)))
-        x = jax.nn.gelu(x + self.gate_tcn_2(self._causal_conv_inputs(x, dilation=2)))
-        log_gates = jax.nn.log_sigmoid(self.gate_out(x[:, -1, :]).reshape(batch_size, chunk_count))
+        if self.gate_sources == ("state",):
+            tcn_in, tcn_1, tcn_2, gate_out = (
+                self.state_gate_tcn_in, self.state_gate_tcn_1, self.state_gate_tcn_2, self.state_gate_out
+            )
+        elif self.gate_sources == ("tactile",):
+            tcn_in, tcn_1, tcn_2, gate_out = (
+                self.tactile_tcn_in, self.tactile_tcn_1, self.tactile_tcn_2, self.tactile_gate_out
+            )
+        else:
+            tcn_in, tcn_1, tcn_2, gate_out = self.gate_tcn_in, self.gate_tcn_1, self.gate_tcn_2, self.gate_out
+        x = jax.nn.gelu(tcn_in(x))
+        x = jax.nn.gelu(x + tcn_1(self._causal_conv_inputs(x, dilation=1)))
+        x = jax.nn.gelu(x + tcn_2(self._causal_conv_inputs(x, dilation=2)))
+        log_gates = jax.nn.log_sigmoid(gate_out(x[:, -1, :]).reshape(batch_size, chunk_count))
         if self._gate_log_exp_name is not None:
             jax.debug.callback(
                 functools.partial(_append_gate_log, self._gate_log_exp_name),

@@ -212,6 +212,7 @@ def test_unified_tactile_attention_gate_config_and_initialization():
         action_expert_variant="dummy",
     )
     model = config.create(jax.random.key(0))
+    assert not hasattr(model, "gate_fusion")
     assert _action_ar_mask(6, 2, "attention_gate") == [True, False, False, False, False, False]
     base_mask = jnp.ones((1, 6, 6), dtype=jnp.bool_)
     assert jnp.array_equal(model._mask_action_chunks(base_mask, 0), base_mask)  # noqa: SLF001
@@ -275,8 +276,10 @@ def test_unified_state_attention_gate_keeps_discrete_state_prompt():
         paligemma_variant="dummy", action_expert_variant="dummy",
     )
     model = config.create(jax.random.key(0))
+    assert not hasattr(model, "gate_fusion")
     observation = config.fake_obs()
-    assert hasattr(model, "state_proj")
+    assert not hasattr(model, "state_proj")
+    assert hasattr(model, "state_gate_proj")
     assert _action_ar_mask(6, 2, "attention_gate") == [True, False, False, False, False, False]
     log_gates = model._attention_log_gates(observation)  # noqa: SLF001
     assert log_gates.shape == (1, 3)
