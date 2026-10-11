@@ -877,7 +877,7 @@ def make_univtac_config(
     *,
     use_tactile: bool = False,
 ) -> TrainConfig:
-    dataset_dir = f"/data/datasets/univtac/{dataset_name}"
+    dataset_dir = f"/public/node01/users/lvrui/datasets/lerobot/univtac/{dataset_name}"
     name = f"pi05_UniVTAC_{dataset_name}{'_tactile' if use_tactile else ''}"
     return TrainConfig(
         name=name,
