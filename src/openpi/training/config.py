@@ -91,6 +91,11 @@ class Bench2DexPi05Config(pi0_config.Pi0Config):
                 images=dict.fromkeys(self.image_keys, image_spec),
                 image_masks=dict.fromkeys(self.image_keys, image_mask_spec),
                 state=jax.ShapeDtypeStruct([batch_size, self.action_dim], jnp.float32),
+                observation_delay_chunks=(
+                    jax.ShapeDtypeStruct([batch_size], jnp.int32)
+                    if self.use_observation_delay_embedding
+                    else None
+                ),
                 state_history=(
                     jax.ShapeDtypeStruct(
                         [batch_size, self.gate_history_length, self.action_dim], jnp.float32
@@ -876,15 +881,27 @@ def make_univtac_config(
     dataset_name: str,
     *,
     use_tactile: bool = False,
+    gemma_lora: bool = False,
 ) -> TrainConfig:
     dataset_dir = f"/public/node01/users/lvrui/datasets/lerobot/univtac/{dataset_name}"
-    name = f"pi05_UniVTAC_{dataset_name}{'_tactile' if use_tactile else ''}"
+    name = (
+        f"pi05_UniVTAC_{dataset_name}"
+        f"{'_tactile' if use_tactile else ''}"
+        f"{'_lora' if gemma_lora else ''}"
+    )
+    model = pi0_config.Pi0Config(
+        pi05=True,
+        use_tactile=use_tactile,
+        paligemma_variant="gemma_2b_lora" if gemma_lora else "gemma_2b",
+        action_expert_variant="gemma_300m",
+    )
     return TrainConfig(
         name=name,
-        model=pi0_config.Pi0Config(
-            pi05=True,
-            use_tactile=use_tactile,
-        ),
+        model=model,
+        # For a LoRA preset this freezes the VLM Gemma base weights while
+        # keeping its LoRA parameters trainable. Other model parameters stay
+        # trainable. For the regular preset this is nnx.Nothing.
+        freeze_filter=model.get_freeze_filter(),
         data=LeRobotUniVTACDataConfig(
             repo_id=dataset_dir,
             assets=AssetsConfig(asset_id=dataset_dir),
@@ -901,6 +918,7 @@ def make_univtac_config(
         save_interval=5000,
         keep_period=5000,
         num_workers=32,
+        ema_decay=None if gemma_lora else 0.99,
     )
 
 
@@ -2370,6 +2388,14 @@ _CONFIGS = [
     make_univtac_config("lift_can"),
     make_univtac_config("pull_out_key"),
     make_univtac_config("put_bottle_in_shelf"),
+    make_univtac_config("grasp_classify", gemma_lora=True),
+    make_univtac_config("insert_HDMI", gemma_lora=True),
+    make_univtac_config("insert_hole", gemma_lora=True),
+    make_univtac_config("insert_tube", gemma_lora=True),
+    make_univtac_config("lift_bottle", gemma_lora=True),
+    make_univtac_config("lift_can", gemma_lora=True),
+    make_univtac_config("pull_out_key", gemma_lora=True),
+    make_univtac_config("put_bottle_in_shelf", gemma_lora=True),
     make_univtac_config("grasp_classify", use_tactile=True),
     make_univtac_config("insert_HDMI", use_tactile=True),
     make_univtac_config("insert_hole", use_tactile=True),
@@ -2378,6 +2404,14 @@ _CONFIGS = [
     make_univtac_config("lift_can", use_tactile=True),
     make_univtac_config("pull_out_key", use_tactile=True),
     make_univtac_config("put_bottle_in_shelf", use_tactile=True),
+    make_univtac_config("grasp_classify", use_tactile=True, gemma_lora=True),
+    make_univtac_config("insert_HDMI", use_tactile=True, gemma_lora=True),
+    make_univtac_config("insert_hole", use_tactile=True, gemma_lora=True),
+    make_univtac_config("insert_tube", use_tactile=True, gemma_lora=True),
+    make_univtac_config("lift_bottle", use_tactile=True, gemma_lora=True),
+    make_univtac_config("lift_can", use_tactile=True, gemma_lora=True),
+    make_univtac_config("pull_out_key", use_tactile=True, gemma_lora=True),
+    make_univtac_config("put_bottle_in_shelf", use_tactile=True, gemma_lora=True),
 
     TrainConfig(
         # This config is for fine-tuning pi05-DROID on a custom (smaller) DROID dataset.

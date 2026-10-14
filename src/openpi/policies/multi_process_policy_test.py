@@ -18,6 +18,7 @@ def test_reset_stream_can_clear_prefix_cache():
     policy._cache_version = "model:7"
     policy._prefix_cache = {"cache": "active"}
     policy._pending_cache = (8, "model:8", {"cache": "pending"})
+    policy._observation_start_chunks = {}
     policy._streaming_state = _StreamingState("old", 12, object())
 
     result = policy._reset_stream({"session_id": "new", "clear_prefix_cache": True})
@@ -86,6 +87,35 @@ def test_refresh_prefix_can_wait_for_active_cache(monkeypatch):
     assert result["active_cache_id"] == 8
     assert policy._cache_version == "model:8"
     assert policy._prefix_cache == {"cache": "new"}
+
+
+def test_observation_start_marker_snapshots_current_fm_chunk():
+    policy = object.__new__(MultiProcessPolicy)
+    policy._cache_lock = threading.Lock()
+    policy._current_chunk_index = 4
+    policy._observation_start_chunks = {}
+
+    marker = policy._record_observation_start({"request_id": "vlm-request-1"})
+
+    assert marker == {
+        "protocol_version": 1,
+        "request_id": "vlm-request-1",
+        "observation_chunk_id": 4,
+    }
+    assert policy._observation_start_chunks["vlm-request-1"] == 4
+
+
+def test_cache_delay_advances_while_same_prefix_cache_is_active():
+    policy = object.__new__(MultiProcessPolicy)
+    policy.policy = SimpleNamespace(_model=SimpleNamespace(observation_delay_max_chunks=8))
+
+    first_use = policy._cache_delay_chunks(4, 0)
+    next_chunk = policy._cache_delay_chunks(5, 0)
+    after_cache_switch = policy._cache_delay_chunks(5, 1)
+
+    assert int(first_use[0]) == 4
+    assert int(next_chunk[0]) == 5
+    assert int(after_cache_switch[0]) == 4
 
 
 def test_seed_streaming_state_keeps_clean_chunk_before_future_window(monkeypatch):

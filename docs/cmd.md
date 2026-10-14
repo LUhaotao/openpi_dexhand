@@ -98,12 +98,14 @@ FM 的初始 cache setup 和 streaming seed 在正式计时前完成；计时过
 
 ### UniVTAC streaming（两张 GPU）
 
-在推理机器上分别启动两个 role。VLM 与 FM 在同一台机器时，FM 的 `--vlm-host` 保持 `127.0.0.1`：
+在推理机器上分别启动两个 role。VLM 编码观测时会向 FM 查询当前 chunk 编号，因此 VLM 也要配置 FM 地址；同机部署时使用 `127.0.0.1:8000`。FM 侧仍通过 `--vlm-host/--vlm-port` 拉取 VLM 生成的 KVCache：
 
 ```bash
 CUDA_VISIBLE_DEVICES=0 XLA_PYTHON_CLIENT_PREALLOCATE=false .venv/bin/python scripts/serve_policy.py \
   --multi-process-role vlm \
   --port 8001 \
+  --fm-host 127.0.0.1 \
+  --fm-port 8000 \
   policy:checkpoint \
   --policy.config pi05_franka_xhand_flower_streaming \
   --policy.dir /path/to/streaming_checkpoint

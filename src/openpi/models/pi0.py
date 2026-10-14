@@ -162,6 +162,9 @@ class Pi0(_model.BaseModel):
         self.streaming_constant_weight = config.streaming_constant_weight
         self.streaming_chunk_wise_weight = config.streaming_chunk_wise_weight
         self.streaming_token_wise_weight = config.streaming_token_wise_weight
+        self.observation_delay_max_chunks = (
+            config.observation_delay_max_chunks if config.use_observation_delay_embedding else 0
+        )
         self._save_gate_logs = False
         self._gate_log_exp_name: str | None = None
         self.use_tactile = config.use_tactile
@@ -201,6 +204,10 @@ class Pi0(_model.BaseModel):
                 self.state_proj = nnx.Linear(config.action_dim, action_expert_config.width, rngs=rngs)
             self.time_mlp_in = nnx.Linear(action_expert_config.width, action_expert_config.width, rngs=rngs)
             self.time_mlp_out = nnx.Linear(action_expert_config.width, action_expert_config.width, rngs=rngs)
+            if self.observation_delay_max_chunks > 0:
+                self.observation_delay_embedding = nnx.Param(
+                    jnp.zeros((self.observation_delay_max_chunks + 1, action_expert_config.width), dtype=jnp.float32)
+                )
             if (
                 config.streaming_attention_mode == "attention_gate"
                 and config.gate_sources == ("state",)
@@ -448,6 +455,15 @@ class Pi0(_model.BaseModel):
             ar_mask += [True]
 
         action_tokens = self.action_in_proj(noisy_actions)
+        if self.observation_delay_max_chunks > 0:
+            delay_chunks = obs.observation_delay_chunks
+            if delay_chunks is None:
+                delay_chunks = jnp.zeros((obs.state.shape[0],), dtype=jnp.int32)
+            delay_indices = jnp.clip(
+                jnp.asarray(delay_chunks, dtype=jnp.int32), 0, self.observation_delay_max_chunks
+            )
+            delay_embedding = self.observation_delay_embedding.value[delay_indices]
+            action_tokens = action_tokens + delay_embedding[:, None, :].astype(action_tokens.dtype)
         action_horizon = noisy_actions.shape[1]
         # embed timestep using sine-cosine positional encoding with sensitivity in the range [0, 1]
         time_emb = posemb_sincos(timestep, self.action_in_proj.out_features, min_period=4e-3, max_period=4.0)
@@ -718,6 +734,7 @@ class Pi0(_model.BaseModel):
         tactile_right_marker_history: at.Float[at.Array, "b th 2 63 2"] | None = None,
         torque_history: at.Float[at.Array, "b th td"] | None = None,
         state_history: at.Float[at.Array, "b th s"] | None = None,
+        observation_delay_chunks: at.Int[at.Array, "..."] | None = None,
     ) -> _model.Actions:
         """Run flow matching using a prefix KV cache produced by ``encode_prefix``."""
         if getattr(self, "use_tactile_adarms", False) and tactile_condition is None:
@@ -745,6 +762,7 @@ class Pi0(_model.BaseModel):
                 jnp.broadcast_to(time, batch_size),
                 tactile_condition,
                 attention_log_gates,
+                observation_delay_chunks,
             )
             return x_t + dt * v_t, time + dt
 
@@ -770,6 +788,7 @@ class Pi0(_model.BaseModel):
         tactile_right_marker_history: at.Float[at.Array, "b th 2 63 2"] | None = None,
         torque_history: at.Float[at.Array, "b th td"] | None = None,
         state_history: at.Float[at.Array, "b th s"] | None = None,
+        observation_delay_chunks: at.Int[at.Array, "..."] | None = None,
     ) -> _model.Actions:
         """Advance a token-wise diffusion-forcing window by completed action chunks."""
         if not self.streaming:
@@ -793,7 +812,11 @@ class Pi0(_model.BaseModel):
             step_rng, action_buffer = carry
             step_rng, noise_rng = jax.random.split(step_rng)
             actions = action_buffer[:, chunk_size:]
-            if tactile_condition is None and attention_log_gates is None:
+            if (
+                tactile_condition is None
+                and attention_log_gates is None
+                and observation_delay_chunks is None
+            ):
                 velocity = self._velocity_from_prefix(state, prefix_cache, actions, timestep[None, :])
             else:
                 velocity = self._velocity_from_prefix(
@@ -803,6 +826,7 @@ class Pi0(_model.BaseModel):
                     timestep[None, :],
                     tactile_condition,
                     attention_log_gates,
+                    observation_delay_chunks,
                 )
             fresh_noise = jax.random.normal(
                 noise_rng,
@@ -822,13 +846,16 @@ class Pi0(_model.BaseModel):
         timestep: at.Float[at.Array, "b ..."],
         tactile_condition: at.Float[at.Array, "b emb"] | None = None,
         attention_log_gates: at.Float[at.Array, "b k"] | None = None,
+        observation_delay_chunks: at.Int[at.Array, "..."] | None = None,
     ) -> _model.Actions:
         """Predict flow velocity for suffix tokens against an encoded prefix."""
         kv_cache = jax.tree.map(
             lambda value: jnp.asarray(value, dtype=jnp.bfloat16), prefix_cache["kv_cache"]
         )
         prefix_pad_masks = jnp.asarray(prefix_cache["prefix_pad_mask"], dtype=jnp.bool_)
-        suffix_observation = _model.Observation(images={}, image_masks={}, state=state)
+        suffix_observation = _model.Observation(
+            images={}, image_masks={}, state=state, observation_delay_chunks=observation_delay_chunks
+        )
         suffix_tokens, suffix_mask, suffix_ar_mask, adarms_cond = self.embed_suffix(
             suffix_observation, noisy_actions, timestep, tactile_condition
         )

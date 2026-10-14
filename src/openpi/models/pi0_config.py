@@ -56,9 +56,11 @@ class Pi0Config(_model.BaseModelConfig):
     streaming_constant_weight: float = 0.2
     streaming_chunk_wise_weight: float = 0.8
     streaming_token_wise_weight: float = 0.0
-    # JAX training only: sample a visual/observation delay d in units of
-    # streaming_chunk_size. A value of 0 disables the augmentation.
+    # Randomly sample an observation delay d in chunks during JAX training.
     observation_delay_max_chunks: int = 0
+    # Add a learned embedding of d to Pi05 action features. Disabled for
+    # checkpoint compatibility unless explicitly enabled.
+    use_observation_delay_embedding: bool = False
     use_tactile: bool = False
     use_torque: bool = False
     torque_dim: int = 0
@@ -90,6 +92,11 @@ class Pi0Config(_model.BaseModelConfig):
             raise ValueError("action_horizon must be divisible by streaming_chunk_size")
         if self.observation_delay_max_chunks < 0:
             raise ValueError("observation_delay_max_chunks must be non-negative")
+        if self.use_observation_delay_embedding:
+            if not self.pi05 or not self.streaming:
+                raise ValueError("observation delay embedding requires pi05=True and streaming=True")
+            if self.observation_delay_max_chunks < 1:
+                raise ValueError("observation delay embedding requires observation_delay_max_chunks > 0")
         if self.streaming_attention_mode not in (
             "mask",
             "causal",
@@ -193,6 +200,11 @@ class Pi0Config(_model.BaseModelConfig):
                     "right_wrist_0_rgb": image_mask_spec,
                 },
                 state=jax.ShapeDtypeStruct([batch_size, self.action_dim], jnp.float32),
+                observation_delay_chunks=(
+                    jax.ShapeDtypeStruct([batch_size], jnp.int32)
+                    if self.use_observation_delay_embedding
+                    else None
+                ),
                 state_history=(
                     jax.ShapeDtypeStruct(
                         [batch_size, self.gate_history_length, self.action_dim],

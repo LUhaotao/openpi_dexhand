@@ -16,6 +16,9 @@ dependencies = [
     "gym-aloha>=0.1.1",
     "imageio>=2.36.1",
     "jax[cuda12]==0.5.3",
+    # NCCL 2.26.2 can fault on the two-GPU 6000D path; keep the JAX CUDA
+    # runtime on the tested NCCL release.
+    "nvidia-nccl-cu12==2.31.2; platform_system == 'Linux' and platform_machine == 'x86_64'",
     "jaxtyping==0.2.36",
     "lerobot",
     "ml_collections==1.0.0",
@@ -63,7 +66,14 @@ rlds = [
 ]
 
 [tool.uv]
-override-dependencies = ["ml-dtypes==0.4.1", "tensorstore==0.1.74"]
+# The CUDA 12 JAX path needs NCCL 2.31.2 on the two-GPU 6000D nodes.
+# This also overrides torch 2.7.1's older transitive NCCL pin; it does not
+# change the PyTorch package or its source path.
+override-dependencies = [
+    "ml-dtypes==0.4.1",
+    "tensorstore==0.1.74",
+    "nvidia-nccl-cu12==2.31.2",
+]
 
 [tool.uv.sources]
 openpi-client = { workspace = true }

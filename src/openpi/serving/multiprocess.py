@@ -52,12 +52,14 @@ def make_cache_envelope(
     model_id: str,
     cache_id: int,
     cache_version: str,
+    observation_request_id: str | None = None,
+    observation_chunk_id: int | None = None,
 ) -> dict[str, Any]:
     """Build a portable cache payload with metadata for FM validation."""
     cache = encode_prefix_cache(cache)
     manifest = _manifest(cache)
     payload_size = sum(item["nbytes"] for item in manifest)
-    return {
+    envelope = {
         "protocol_version": 1,
         "model_id": model_id,
         "cache_id": int(cache_id),
@@ -66,6 +68,11 @@ def make_cache_envelope(
         "payload_size": int(payload_size),
         "prefix_cache": cache,
     }
+    if observation_request_id is not None:
+        envelope["observation_request_id"] = observation_request_id
+    if observation_chunk_id is not None:
+        envelope["observation_chunk_id"] = int(observation_chunk_id)
+    return envelope
 
 
 def validate_cache_envelope(

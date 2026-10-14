@@ -44,6 +44,7 @@ def test_delayed_observation_transform_delays_images_and_discrete_state(monkeypa
     np.testing.assert_array_equal(result["state"], [3.0])
     # Delta actions stay relative to the current state (1.0), not the delayed state (3.0).
     np.testing.assert_array_equal(result["actions"], [[4.0]])
+    assert result["observation_delay_chunks"] == 2
 
 
 def test_delayed_observation_transform_keeps_continuous_state_current(monkeypatch):
@@ -75,6 +76,7 @@ def test_delayed_observation_transform_keeps_continuous_state_current(monkeypatc
 
     np.testing.assert_array_equal(result["images"]["camera"], 20)
     np.testing.assert_array_equal(result["state"], [7.0])
+    assert result["observation_delay_chunks"] == 1
 
 
 def test_state_gate_history_and_delayed_discrete_prompt_use_separate_states(monkeypatch):

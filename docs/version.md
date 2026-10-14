@@ -184,4 +184,8 @@ openpi这个代码的Config记录很有问题，每一个Train-Infer必须成对
 
 - [*] 推理时日志
 
-- [] fake env
+- [*] fake env
+
+## version 0.3.2
+
+- [] 增加观测延迟embedding进入FM

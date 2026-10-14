@@ -117,6 +117,53 @@ def test_tactile_adarms_requires_tactile():
         _pi0_config.Pi0Config(pi05=True, use_tactile_adarms=True)
 
 
+def test_observation_delay_chunk_embedding_is_added_to_pi05_action_tokens():
+    config = _pi0_config.Pi0Config(
+        pi05=True,
+        streaming=True,
+        streaming_chunk_size=2,
+        action_horizon=6,
+        observation_delay_max_chunks=2,
+        use_observation_delay_embedding=True,
+        paligemma_variant="dummy",
+        action_expert_variant="dummy",
+    )
+    model = config.create(jax.random.key(0))
+    observation = config.fake_obs()
+    actions = jnp.zeros((1, config.action_horizon, config.action_dim), dtype=jnp.float32)
+    timestep = jnp.ones((1, config.action_horizon), dtype=jnp.float32)
+
+    assert jnp.all(model.observation_delay_embedding.value == 0)
+    model.observation_delay_embedding.value = model.observation_delay_embedding.value.at[2].set(0.25)
+    delayed_observation = observation.replace(observation_delay_chunks=jnp.asarray([2], dtype=jnp.int32))
+
+    current_tokens, _, _, _ = model.embed_suffix(observation, actions, timestep)
+    delayed_tokens, _, _, _ = model.embed_suffix(delayed_observation, actions, timestep)
+    assert jnp.allclose(delayed_tokens - current_tokens, 0.25)
+
+    prefix_cache = model.encode_prefix(observation)
+    sampled = model.sample_actions_from_prefix(
+        jax.random.key(1),
+        observation.state,
+        prefix_cache,
+        num_steps=1,
+        noise=actions,
+        observation_delay_chunks=delayed_observation.observation_delay_chunks,
+    )
+    assert sampled.shape == actions.shape
+
+    action_window = jnp.zeros((1, config.action_horizon + config.streaming_chunk_size, config.action_dim))
+    advanced = model.advance_streaming_actions_from_prefix(
+        jax.random.key(2),
+        observation.state,
+        prefix_cache,
+        action_window,
+        jnp.asarray(1, dtype=jnp.int32),
+        observation_delay_chunks=delayed_observation.observation_delay_chunks,
+    )
+    assert advanced.shape == action_window.shape
+
+
 def test_pi0_config_snapshot_round_trip(tmp_path):
     config = _pi0_config.Pi0Config(
         pi05=True,

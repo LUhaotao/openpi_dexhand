@@ -7,6 +7,7 @@ import dataclasses
 import logging
 import queue
 import threading
+import uuid
 from typing import Any, Literal
 
 import jax
@@ -37,6 +38,8 @@ class MultiProcessPolicy:
     role: Literal["vlm", "fm"]
     vlm_host: str = "127.0.0.1"
     vlm_port: int | None = None
+    fm_host: str = "127.0.0.1"
+    fm_port: int | None = None
 
     def __post_init__(self):
         if self.role not in ("vlm", "fm"):
@@ -45,7 +48,10 @@ class MultiProcessPolicy:
         self._cache_id = 0
         self._cache_version: str | None = None
         self._prefix_cache: dict[str, Any] | None = None
-        self._pending_cache: tuple[int, str, dict[str, Any]] | None = None
+        self._pending_cache: tuple[int, str, dict[str, Any], int | None] | tuple[int, str, dict[str, Any]] | None = None
+        self._active_cache_observation_chunk_id: int | None = None
+        self._observation_start_chunks: dict[str, int] = {}
+        self._current_chunk_index = 0
         self._cache_lock = threading.Lock()
         self._initial_ready = threading.Event()
         self._initial_error: Exception | None = None
@@ -58,6 +64,7 @@ class MultiProcessPolicy:
         # ponytail: one active stream per FM server; use a session map only for multi-robot serving.
         self._streaming_state: _StreamingState | None = None
         self._vlm_client = None
+        self._fm_client = None
         self._encode_prefix_jit = nnx_utils.module_jit(self.policy._model.encode_prefix)  # noqa: SLF001
         self._encode_tactile_jit = (
             nnx_utils.module_jit(self.policy._model._marker_condition)  # noqa: SLF001
@@ -101,6 +108,11 @@ class MultiProcessPolicy:
             },
             image_masks={key: jnp.ones((1,), dtype=jnp.bool_) for key in _model.IMAGE_KEYS},
             state=jnp.ones((1, model.action_dim), dtype=jnp.float32),
+            observation_delay_chunks=(
+                jnp.zeros((1,), dtype=jnp.int32)
+                if getattr(model, "observation_delay_max_chunks", 0) > 0
+                else None
+            ),
             torque=(
                 jnp.ones((1, model.torque_dim), dtype=jnp.float32)
                 if getattr(model, "use_torque", False)
@@ -173,6 +185,7 @@ class MultiProcessPolicy:
             tactile_right_marker_history=observation.tactile_right_marker_history,
             torque_history=observation.torque_history,
             state_history=observation.state_history,
+            observation_delay_chunks=observation.observation_delay_chunks,
         )
         self._block_until_ready(actions)
         if getattr(self.policy._model, "streaming", False):  # noqa: SLF001
@@ -189,6 +202,7 @@ class MultiProcessPolicy:
                 tactile_right_marker_history=observation.tactile_right_marker_history,
                 torque_history=observation.torque_history,
                 state_history=observation.state_history,
+                observation_delay_chunks=observation.observation_delay_chunks,
             )
             self._block_until_ready(advanced)
 
@@ -205,6 +219,21 @@ class MultiProcessPolicy:
         return self._encode_tactile_jit(observation)
 
     def _encode_prefix(self, observation: dict[str, Any]) -> dict[str, Any]:
+        observation_request_id = None
+        observation_chunk_id = None
+        if getattr(self.policy._model, "observation_delay_max_chunks", 0) > 0:  # noqa: SLF001
+            if self.fm_port is None:
+                raise ValueError("fm_port is required for observation-delay cache numbering")
+            from openpi_client.websocket_client_policy import WebsocketClientPolicy
+
+            if self._fm_client is None:
+                self._fm_client = WebsocketClientPolicy(self.fm_host, self.fm_port)
+            observation_request_id = uuid.uuid4().hex
+            marker = self._fm_client.infer({
+                "op": "observation_started",
+                "request_id": observation_request_id,
+            })
+            observation_chunk_id = int(marker["observation_chunk_id"])
         model_observation = self._prepare(observation)
         cache = self._encode_prefix_jit(model_observation)
         self._cache_id += 1
@@ -214,6 +243,8 @@ class MultiProcessPolicy:
             model_id=self.model_id,
             cache_id=self._cache_id,
             cache_version=self._cache_version,
+            observation_request_id=observation_request_id,
+            observation_chunk_id=observation_chunk_id,
         )
         return {
             "protocol_version": 1,
@@ -240,6 +271,9 @@ class MultiProcessPolicy:
 
         if op == "refresh_prefix":
             return self._refresh_prefix(request)
+        if op == "observation_started":
+            with self._infer_lock:
+                return self._record_observation_start(request)
         with self._infer_lock:
             if op == "reset_stream":
                 return self._reset_stream(request)
@@ -337,6 +371,17 @@ class MultiProcessPolicy:
                     else value,
                     cache,
                 )
+                observation_chunk_id = None
+                if getattr(self.policy._model, "observation_delay_max_chunks", 0) > 0:  # noqa: SLF001
+                    request_id = envelope.get("observation_request_id")
+                    if not isinstance(request_id, str):
+                        raise ValueError("Delay-conditioned cache is missing its observation request id")
+                    with self._cache_lock:
+                        observation_chunk_id = self._observation_start_chunks.pop(request_id, None)
+                    if observation_chunk_id is None:
+                        raise ValueError("No FM chunk marker found for the VLM cache request")
+                    if int(envelope.get("observation_chunk_id", -1)) != observation_chunk_id:
+                        raise ValueError("VLM cache chunk marker does not match the FM request marker")
                 with self._cache_lock:
                     if generation != self._refresh_generation:
                         raise RuntimeError("Prefix-cache refresh superseded")
@@ -344,6 +389,7 @@ class MultiProcessPolicy:
                         int(envelope["cache_id"]),
                         envelope["cache_version"],
                         cache,
+                        observation_chunk_id,
                     )
                 if future is not None:
                     future.set_result({
@@ -360,13 +406,15 @@ class MultiProcessPolicy:
         with self._cache_lock:
             if self._pending_cache is None:
                 return
-            cache_id, cache_version, cache = self._pending_cache
+            cache_id, cache_version, cache = self._pending_cache[:3]
+            observation_chunk_id = self._pending_cache[3] if len(self._pending_cache) > 3 else None
             self._prefix_cache = cache
             self._cache_id = cache_id
             self._cache_version = cache_version
+            self._active_cache_observation_chunk_id = observation_chunk_id
             self._pending_cache = None
 
-    def _snapshot_cache(self) -> tuple[dict[str, Any], str, str | None]:
+    def _snapshot_cache(self) -> tuple[dict[str, Any], str, str | None, int | None]:
         previous_version = self._cache_version
         self._activate_pending()
         with self._cache_lock:
@@ -383,7 +431,23 @@ class MultiProcessPolicy:
                 raise RuntimeError("No active prefix cache; call refresh_prefix first")
             # The caller may have read the old version just before this
             # chunk-boundary swap. Accept that one stale version transition.
-            return self._prefix_cache, self._cache_version, previous_version
+            return (
+                self._prefix_cache,
+                self._cache_version,
+                previous_version,
+                self._active_cache_observation_chunk_id,
+            )
+
+    def _record_observation_start(self, request: dict[str, Any]) -> dict[str, Any]:
+        request_id = request.get("request_id")
+        if not isinstance(request_id, str) or not request_id:
+            raise ValueError("observation_started requires a non-empty request_id")
+        chunk_id = int(self._current_chunk_index)
+        with self._cache_lock:
+            self._observation_start_chunks[request_id] = chunk_id
+            while len(self._observation_start_chunks) > 256:
+                self._observation_start_chunks.pop(next(iter(self._observation_start_chunks)))
+        return {"protocol_version": 1, "request_id": request_id, "observation_chunk_id": chunk_id}
 
     def _reset_stream(self, request: dict[str, Any]) -> dict[str, Any]:
         session_id = request.get("session_id", "default")
@@ -393,6 +457,7 @@ class MultiProcessPolicy:
         if not isinstance(clear_prefix_cache, bool):
             raise ValueError("clear_prefix_cache must be a boolean")
         self._streaming_state = None
+        self._current_chunk_index = 0
         reset_history = getattr(getattr(self, "policy", None), "reset_tactile_history", None)
         if callable(reset_history):
             reset_history(session_id)
@@ -403,6 +468,8 @@ class MultiProcessPolicy:
                 self._pending_cache = None
                 self._cache_id = 0
                 self._cache_version = None
+                self._active_cache_observation_chunk_id = None
+                self._observation_start_chunks.clear()
         return {
             "protocol_version": 1,
             "session_id": session_id,
@@ -411,27 +478,31 @@ class MultiProcessPolicy:
         }
 
     def _stream_infer(self, request: dict[str, Any]) -> dict[str, Any]:
-        prefix_cache, cache_version, previous_version = self._snapshot_cache()
-        expected = request.get("expected_cache_version")
-        if expected is not None and expected not in (cache_version, previous_version):
-            raise ValueError(
-                f"Cache version mismatch: expected {expected!r}, active {cache_version!r}"
-            )
         model = self.policy._model  # noqa: SLF001
         if not getattr(model, "streaming", False):
             raise ValueError("stream_infer requires a checkpoint configured with model.streaming=True")
-
         session_id = request.get("session_id", "default")
         execution_id = request.get("executed_action_id")
         if not isinstance(session_id, str) or not session_id:
             raise ValueError("session_id must be a non-empty string")
         if not isinstance(execution_id, int) or isinstance(execution_id, bool) or execution_id < 0:
             raise ValueError("executed_action_id must be a non-negative integer")
+        chunk_size = int(model.streaming_chunk_size)
+        self._current_chunk_index = execution_id // chunk_size
+        prefix_cache, cache_version, previous_version, cache_observation_chunk_id = self._snapshot_cache()
+        expected = request.get("expected_cache_version")
+        if expected is not None and expected not in (cache_version, previous_version):
+            raise ValueError(
+                f"Cache version mismatch: expected {expected!r}, active {cache_version!r}"
+            )
 
         model_observation = self._prepare(
             request["observation"], session_id=session_id, update_tactile_history=True
         )
         tactile_condition = self._tactile_condition(model_observation)
+        observation_delay_chunks = self._cache_delay_chunks(
+            self._current_chunk_index, cache_observation_chunk_id
+        )
         if self._streaming_state is None:
             self._streaming_state = self._seed_streaming_state(
                 session_id,
@@ -443,6 +514,7 @@ class MultiProcessPolicy:
                 tactile_right_marker_history=model_observation.tactile_right_marker_history,
                 torque_history=model_observation.torque_history,
                 state_history=model_observation.state_history,
+                observation_delay_chunks=observation_delay_chunks,
                 num_steps=int(request.get("num_steps", 10)),
             )
         elif self._streaming_state.session_id != session_id:
@@ -467,6 +539,7 @@ class MultiProcessPolicy:
                     tactile_right_marker_history=model_observation.tactile_right_marker_history,
                     torque_history=model_observation.torque_history,
                     state_history=model_observation.state_history,
+                    observation_delay_chunks=observation_delay_chunks,
                 )
                 self._streaming_state.execution_id = execution_id
 
@@ -496,6 +569,7 @@ class MultiProcessPolicy:
         tactile_right_marker_history: Any = None,
         torque_history: Any = None,
         state_history: Any = None,
+        observation_delay_chunks: Any = None,
         num_steps: int,
     ) -> _StreamingState:
         if num_steps <= 0:
@@ -511,6 +585,7 @@ class MultiProcessPolicy:
             tactile_right_marker_history=tactile_right_marker_history,
             torque_history=torque_history,
             state_history=state_history,
+            observation_delay_chunks=observation_delay_chunks,
         )
         timestep = self.policy._model.streaming_timestep(actions.dtype)  # noqa: SLF001
         noise = jax.random.normal(noise_rng, actions.shape, dtype=actions.dtype)
@@ -526,7 +601,7 @@ class MultiProcessPolicy:
         return _StreamingState(session_id, execution_id, action_window)
 
     def _infer_fm(self, request: dict[str, Any]) -> dict[str, Any]:
-        prefix_cache, cache_version, previous_version = self._snapshot_cache()
+        prefix_cache, cache_version, previous_version, cache_observation_chunk_id = self._snapshot_cache()
         expected = request.get("expected_cache_version")
         if expected is not None and expected not in (cache_version, previous_version):
             raise ValueError(
@@ -537,6 +612,9 @@ class MultiProcessPolicy:
             request["observation"], session_id=session_id, update_tactile_history=True
         )
         tactile_condition = self._tactile_condition(model_observation)
+        observation_delay_chunks = self._cache_delay_chunks(
+            self._current_chunk_index, cache_observation_chunk_id
+        )
         self._rng, sample_rng = jax.random.split(self._rng)
         noise_tokens = int(request.get("noise_tokens", self.policy._model.action_horizon))  # noqa: SLF001
         if noise_tokens <= 0 or noise_tokens > self.policy._model.action_horizon:  # noqa: SLF001
@@ -562,9 +640,18 @@ class MultiProcessPolicy:
             tactile_right_marker_history=model_observation.tactile_right_marker_history,
             torque_history=model_observation.torque_history,
             state_history=model_observation.state_history,
+            observation_delay_chunks=observation_delay_chunks,
         )
         result = self.policy._output_transform(  # noqa: SLF001
             {"state": np.asarray(model_observation.state[0]), "actions": np.asarray(actions[0])}
         )
         result["cache_version"] = cache_version
         return result
+
+    def _cache_delay_chunks(self, current_chunk_id: int, observation_chunk_id: int | None):
+        if getattr(self.policy._model, "observation_delay_max_chunks", 0) <= 0:  # noqa: SLF001
+            return None
+        if observation_chunk_id is None:
+            raise RuntimeError("Active prefix cache is missing its observation chunk marker")
+        delay = max(0, current_chunk_id - observation_chunk_id)
+        return jnp.asarray([delay], dtype=jnp.int32)

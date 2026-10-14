@@ -120,7 +120,10 @@ class Policy(BasePolicy):
         self, obs: dict, *, session_id: str = "default", update_tactile_history: bool = True
     ) -> _model.Observation:
         inputs = jax.tree.map(lambda x: x, obs)
+        observation_delay_chunks = inputs.get("observation_delay_chunks")
         inputs = self._input_transform(inputs)
+        if observation_delay_chunks is not None and "observation_delay_chunks" not in inputs:
+            inputs["observation_delay_chunks"] = observation_delay_chunks
         inputs = _split_state_history(inputs)
         model = getattr(self, "_model", None)
         gate_sources = tuple(getattr(model, "gate_sources", ()))

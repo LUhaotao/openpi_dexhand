@@ -121,7 +121,9 @@ class _DelayedObservationTransform:
 
         delayed_data = {**data, "images": delayed_images}
         if not self._discrete_state_input and not self._state_history_length:
-            return self._data(delayed_data)
+            processed = self._data(delayed_data)
+            processed["observation_delay_chunks"] = np.int32(delay_chunks)
+            return processed
 
         state = np.asarray(data.get("state"))
         expected_state_length = len(self._state_offsets) if self._state_history_length else expected_history_length
@@ -152,6 +154,7 @@ class _DelayedObservationTransform:
             if "state" not in delayed_processed:
                 raise ValueError("Data transforms must provide 'state' for discrete-state observation delay.")
             current_processed["state"] = delayed_processed["state"]
+        current_processed["observation_delay_chunks"] = np.int32(delay_chunks)
         return current_processed
 
 

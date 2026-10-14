@@ -60,6 +60,9 @@ class Args:
     multi_process: bool = False
     vlm_port: int | None = None
     vlm_host: str = "127.0.0.1"
+    # FM endpoint used by the VLM to associate cache builds with FM chunk IDs.
+    fm_port: int | None = None
+    fm_host: str = "127.0.0.1"
     # Serve one role only. Use this to pin VLM and FM to separate GPUs.
     multi_process_role: Literal["vlm", "fm"] | None = None
 
@@ -170,8 +173,17 @@ def main(args: Args) -> None:
 
 def _serve_multi_process_role(args: Args, role: str, port: int) -> None:
     policy = create_policy(args)
+    fm_port = args.fm_port
+    if role == "vlm" and fm_port is None:
+        # Keep the documented split-role commands working without extra flags.
+        fm_port = port - 1
     role_policy = MultiProcessPolicy(
-        policy, role, vlm_host=args.vlm_host, vlm_port=args.vlm_port
+        policy,
+        role,
+        vlm_host=args.vlm_host,
+        vlm_port=args.vlm_port,
+        fm_host=args.fm_host,
+        fm_port=fm_port,
     )
     logging.info("Warming up %s server", role.upper())
     role_policy.warmup()
@@ -193,7 +205,9 @@ def _serve_multi_process(args: Args) -> None:
 
     process_context = multiprocessing.get_context("spawn")
     vlm_process = process_context.Process(
-        target=_serve_multi_process_role, args=(args, "vlm", args.vlm_port), daemon=True
+        target=_serve_multi_process_role,
+        args=(dataclasses.replace(args, fm_port=args.port), "vlm", args.vlm_port),
+        daemon=True,
     )
     fm_process = process_context.Process(
         target=_serve_multi_process_role, args=(args, "fm", args.port), daemon=True

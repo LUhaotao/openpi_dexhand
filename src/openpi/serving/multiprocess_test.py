@@ -26,9 +26,18 @@ def test_prefix_cache_round_trip_preserves_arrays_and_metadata():
 
 def test_cache_envelope_validates_manifest_and_preserves_bfloat16():
     cache = {"kv_cache": np.ones((2,), dtype=np.dtype("bfloat16"))}
-    envelope = make_cache_envelope(cache, model_id="pi05", cache_id=3, cache_version="pi05:3")
+    envelope = make_cache_envelope(
+        cache,
+        model_id="pi05",
+        cache_id=3,
+        cache_version="pi05:3",
+        observation_request_id="request-3",
+        observation_chunk_id=7,
+    )
     validate_cache_envelope(envelope, model_id="pi05")
     assert envelope["manifest"][0]["dtype"] == "bfloat16"
+    assert envelope["observation_request_id"] == "request-3"
+    assert envelope["observation_chunk_id"] == 7
 
 
 def test_decode_prefix_cache_restores_kv_cache_tuple_after_msgpack():
