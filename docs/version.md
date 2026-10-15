@@ -188,4 +188,4 @@ openpi这个代码的Config记录很有问题，每一个Train-Infer必须成对
 
 ## version 0.3.2
 
-- [] 增加观测延迟embedding进入FM
+- [*] 增加观测延迟embedding进入FM，实验（1.该权重推理时带embedding，2.该权重推理时不带embedding）效果一样，说明univtac上面这个影响不大，反而额外引入数据配对导致训练难度提升了些许（是这样吗？为啥会比不带embedding效果更差？）也说明univtac上面状态重叠部分比较少（但是embedding除了缓解状态重叠的问题，还有为flow match区分不同延迟观测的作用，理论上来说直接加就算状态不重叠效果也会更好才是）

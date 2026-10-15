@@ -11,7 +11,6 @@ import flax.traverse_util as traverse_util
 import jax
 import jax.experimental
 import jax.numpy as jnp
-import numpy as np
 import optax
 import tqdm_loggable.auto as tqdm
 import wandb
@@ -340,7 +339,7 @@ def main(config: _config.TrainConfig):
             save_steps=config.save_steps,
             start_step=start_step,
         ):
-            _checkpoints.save_state(checkpoint_manager, train_state, data_loader, checkpoint_step, config.model)
+            _checkpoints.save_state(checkpoint_manager, train_state, data_loader, checkpoint_step, config)
 
     logging.info("Waiting for checkpoint manager to finish")
     checkpoint_manager.wait_until_finished()

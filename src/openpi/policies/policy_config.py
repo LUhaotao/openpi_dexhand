@@ -12,6 +12,7 @@ import openpi.policies.policy as _policy
 import openpi.shared.download as download
 from openpi.training import checkpoints as _checkpoints
 from openpi.training import config as _config
+from openpi.training import experiment_config as _experiment_config
 import openpi.transforms as transforms
 
 
@@ -86,7 +87,22 @@ def create_trained_policy(
     """
     repack_transforms = repack_transforms or transforms.Group()
     checkpoint_dir = download.maybe_download(str(checkpoint_dir))
-    if model_config := _pi0_config.load_snapshot(pathlib.Path(checkpoint_dir) / "model_config"):
+    snapshot_dir = pathlib.Path(checkpoint_dir) / "model_config"
+    snapshot_path = snapshot_dir / _pi0_config.SNAPSHOT_FILENAME
+    if snapshot_path.exists():
+        resolved_train_config = _experiment_config.load_checkpoint_train_config(snapshot_path)
+        if resolved_train_config is not None:
+            logging.info("Loading resolved JAX experiment config from checkpoint")
+            train_config = resolved_train_config
+    model_config_type = (
+        type(train_config.model)
+        if isinstance(train_config.model, _pi0_config.Pi0Config)
+        else _pi0_config.Pi0Config
+    )
+    if model_config := _pi0_config.load_snapshot(
+        snapshot_dir,
+        config_type=model_config_type,
+    ):
         logging.info("Loading Pi0Config snapshot from checkpoint")
         train_config = dataclasses.replace(train_config, model=model_config)
 

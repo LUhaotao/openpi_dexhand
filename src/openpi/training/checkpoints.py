@@ -5,7 +5,7 @@ from collections.abc import Collection
 import concurrent.futures as futures
 import dataclasses
 import logging
-from typing import Protocol
+from typing import TYPE_CHECKING, Protocol
 
 from etils import epath
 import jax
@@ -18,6 +18,9 @@ from openpi.shared import array_typing as at
 import openpi.shared.normalize as _normalize
 import openpi.training.data_loader as _data_loader
 import openpi.training.utils as training_utils
+
+if TYPE_CHECKING:
+    from openpi.training import config as _config
 
 
 def initialize_checkpoint_dir(
@@ -95,7 +98,7 @@ def save_state(
     state: training_utils.TrainState,
     data_loader: _data_loader.DataLoader,
     step: int,
-    model_config: _model.BaseModelConfig | None = None,
+    model_config: _config.TrainConfig | _model.BaseModelConfig | None = None,
 ):
     def save_assets(directory: epath.Path):
         # Save the normalization stats.
@@ -112,8 +115,14 @@ def save_state(
         "train_state": train_state,
         "params": {"params": params},
     }
-    if isinstance(model_config, pi0_config.Pi0Config):
-        items["model_config"] = lambda directory: pi0_config.save_snapshot(directory, model_config)
+    runtime_model_config = getattr(model_config, "model", model_config)
+    resolved_config = getattr(model_config, "resolved_config", None)
+    if isinstance(runtime_model_config, pi0_config.Pi0Config):
+        items["model_config"] = lambda directory: pi0_config.save_snapshot(
+            directory,
+            runtime_model_config,
+            resolved_config=resolved_config,
+        )
     checkpoint_manager.save(step, items)
 
 

@@ -2,6 +2,8 @@ import dataclasses
 import enum
 import logging
 import multiprocessing
+import pathlib
+
 # import socket
 from typing import Literal
 
@@ -11,6 +13,7 @@ from openpi.policies import policy as _policy
 from openpi.policies import policy_config as _policy_config
 from openpi.policies.multi_process_policy import MultiProcessPolicy
 from openpi.serving import websocket_policy_server
+from openpi.shared import download
 from openpi.training import config as _config
 
 
@@ -27,10 +30,11 @@ class EnvMode(enum.Enum):
 class Checkpoint:
     """Load a policy from a trained checkpoint."""
 
-    # Training config name (e.g., "pi0_aloha_sim").
-    config: str
     # Checkpoint directory (e.g., "checkpoints/pi0_aloha_sim/exp/10000").
     dir: str
+    # Legacy training config name (e.g., "pi0_aloha_sim"). Complete YAML
+    # checkpoints recover this from model_config/pi0_config.json when omitted.
+    config: str | None = None
 
 
 @dataclasses.dataclass
@@ -104,7 +108,19 @@ def create_policy(args: Args) -> _policy.Policy:
     """Create a policy from the given arguments."""
     match args.policy:
         case Checkpoint():
-            train_config = _multi_process_config(args, _config.get_config(args.policy.config))
+            if args.policy.config is None:
+                from openpi.training import experiment_config as _experiment_config
+
+                checkpoint_dir = download.maybe_download(args.policy.dir)
+                snapshot_path = pathlib.Path(checkpoint_dir) / "model_config" / "pi0_config.json"
+                train_config = _experiment_config.load_checkpoint_train_config(snapshot_path)
+                if train_config is None:
+                    raise ValueError(
+                        "This checkpoint contains only a legacy model config; pass --policy.config with its preset."
+                    )
+            else:
+                train_config = _config.get_config(args.policy.config)
+            train_config = _multi_process_config(args, train_config)
             policy = _policy_config.create_trained_policy(
                 train_config, args.policy.dir, default_prompt=args.default_prompt
             )

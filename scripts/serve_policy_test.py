@@ -71,3 +71,28 @@ def test_create_policy_applies_gate_log_runtime_flag(monkeypatch):
 
     assert result is policy
     assert policy._model.enabled is True
+
+
+def test_create_policy_loads_complete_checkpoint_config_when_preset_is_omitted(monkeypatch, tmp_path):
+    from openpi.training import experiment_config
+
+    checkpoint = tmp_path / "checkpoint"
+    snapshot = checkpoint / "model_config" / "pi0_config.json"
+    snapshot.parent.mkdir(parents=True)
+    snapshot.write_text("{}")
+    train_config = type("TrainConfig", (), {"model": object()})()
+    policy = type("Policy", (), {})()
+
+    monkeypatch.setattr(serve_policy.download, "maybe_download", lambda path: checkpoint)
+    monkeypatch.setattr(experiment_config, "load_checkpoint_train_config", lambda path: train_config)
+    monkeypatch.setattr(
+        serve_policy._policy_config,
+        "create_trained_policy",
+        lambda config, path, **kwargs: policy,
+    )
+
+    result = serve_policy.create_policy(
+        serve_policy.Args(policy=serve_policy.Checkpoint(dir=str(checkpoint)))
+    )
+
+    assert result is policy

@@ -1,4 +1,5 @@
 import csv
+import dataclasses
 import importlib
 import itertools
 import json
@@ -176,14 +177,22 @@ def test_pi0_config_snapshot_round_trip(tmp_path):
     )
     _pi0_config.save_snapshot(tmp_path, config)
     assert _pi0_config.load_snapshot(tmp_path) == config
-    assert json.loads((tmp_path / _pi0_config.SNAPSHOT_FILENAME).read_text()) == {
-        "action_dim": 9,
-        "streaming": True,
-        "streaming_attention_mode": "mask",
-        "streaming_chunk_size": 5,
-        "use_tactile": True,
-        "pi05": True,
-    }
+    saved = json.loads((tmp_path / _pi0_config.SNAPSHOT_FILENAME).read_text())
+    assert set(saved) == {field.name for field in dataclasses.fields(config)}
+    assert saved["gate_sources"] == []
+
+
+def test_pi0_config_snapshot_loads_model_from_resolved_experiment(tmp_path):
+    config = _pi0_config.Pi0Config(pi05=True, streaming=True, streaming_attention_mode="mask")
+    resolved = {"schema_version": 1, "name": "experiment", "model": {"type": "pi05", **dataclasses.asdict(config)}}
+
+    _pi0_config.save_snapshot(tmp_path, config, resolved_config=resolved)
+
+    saved = json.loads((tmp_path / _pi0_config.SNAPSHOT_FILENAME).read_text())
+    assert saved["schema_version"] == resolved["schema_version"]
+    assert saved["name"] == resolved["name"]
+    assert saved["model"]["gate_sources"] == []
+    assert _pi0_config.load_snapshot(tmp_path) == config
 
 
 def test_pi05_false_discrete_state_input_is_preserved_in_snapshot(tmp_path):
@@ -194,6 +203,15 @@ def test_pi05_false_discrete_state_input_is_preserved_in_snapshot(tmp_path):
     snapshot = json.loads((tmp_path / _pi0_config.SNAPSHOT_FILENAME).read_text())
     assert snapshot["discrete_state_input"] is False
     assert _pi0_config.load_snapshot(tmp_path).discrete_state_input is False
+
+
+def test_pi0_snapshot_remains_incremental(tmp_path):
+    config = _pi0_config.Pi0Config(action_horizon=16)
+
+    _pi0_config.save_snapshot(tmp_path, config)
+
+    assert json.loads((tmp_path / _pi0_config.SNAPSHOT_FILENAME).read_text()) == {"action_horizon": 16}
+    assert _pi0_config.load_snapshot(tmp_path) == config
 
 
 def test_action_attention_is_bidirectional_within_causal_streaming_chunks():

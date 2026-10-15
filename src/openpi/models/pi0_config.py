@@ -1,7 +1,8 @@
+from collections.abc import Mapping
 import dataclasses
 import json
 import pathlib
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 import flax.nnx as nnx
 import jax
@@ -261,32 +262,43 @@ class Pi0Config(_model.BaseModelConfig):
         return nnx.All(*filters)
 
 
-def save_snapshot(directory: str | pathlib.Path, config: Pi0Config) -> pathlib.Path:
-    """Save only model settings that differ from the original Pi0 defaults."""
+def save_snapshot(
+    directory: str | pathlib.Path,
+    config: Pi0Config,
+    *,
+    resolved_config: Mapping[str, Any] | None = None,
+) -> pathlib.Path:
+    """Save a full Pi0.5 config while preserving legacy Pi0 snapshots."""
     path = pathlib.Path(directory) / SNAPSHOT_FILENAME
     path.parent.mkdir(parents=True, exist_ok=True)
-    # Compare derived fields against defaults for the same model family. Keep
-    # the pi05 marker itself compared against the base Pi0 default so it is
-    # still persisted when true.
-    defaults = dataclasses.asdict(Pi0Config())
-    defaults["max_token_len"] = 200 if config.pi05 else 48
-    defaults["discrete_state_input"] = config.pi05
-    values = dataclasses.asdict(config)
-    snapshot = {name: value for name, value in values.items() if value != defaults[name]}
-    # These are derived from pi05 and do not need to be persisted when unchanged.
-    if config.max_token_len == (200 if config.pi05 else 48):
-        snapshot.pop("max_token_len", None)
-    if config.discrete_state_input == config.pi05:
-        snapshot.pop("discrete_state_input", None)
-    if config.streaming:
-        snapshot["streaming_chunk_size"] = config.streaming_chunk_size
+    if resolved_config is not None:
+        snapshot = dict(resolved_config)
+    elif config.pi05:
+        snapshot = dataclasses.asdict(config)
+    else:
+        # Pi0 keeps its established incremental snapshot behavior. The
+        # file-backed experiment system is intentionally limited to JAX Pi0.5.
+        defaults = dataclasses.asdict(Pi0Config())
+        values = dataclasses.asdict(config)
+        snapshot = {name: value for name, value in values.items() if value != defaults[name]}
     path.write_text(json.dumps(snapshot, indent=2, sort_keys=True) + "\n")
     return path
 
 
-def load_snapshot(directory: str | pathlib.Path) -> Pi0Config | None:
+def load_snapshot(
+    directory: str | pathlib.Path,
+    *,
+    config_type: type[Pi0Config] = Pi0Config,
+) -> Pi0Config | None:
     """Load a model configuration snapshot, if present."""
     path = pathlib.Path(directory) / SNAPSHOT_FILENAME
     if not path.exists():
         return None
-    return Pi0Config(**json.loads(path.read_text()))
+    snapshot = json.loads(path.read_text())
+    # Accept a nested model object as a convenience for externally produced
+    # experiment snapshots, while remaining compatible with old incremental
+    # flat snapshots.
+    if "model" in snapshot:
+        snapshot = snapshot["model"]
+    snapshot.pop("type", None)
+    return config_type(**snapshot)

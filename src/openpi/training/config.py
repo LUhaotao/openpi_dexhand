@@ -6,6 +6,7 @@ import dataclasses
 import difflib
 import logging
 import pathlib
+import sys
 from typing import Annotated, Any, Literal, Protocol, TypeAlias
 
 import etils.epath as epath
@@ -846,6 +847,11 @@ class TrainConfig:
     # data parallel between 2 groups of devices.
     fsdp_devices: int = 1
 
+    # Fully resolved JSON/YAML source for file-backed JAX experiments. This is
+    # saved with every checkpoint so the run can be inspected independently of
+    # the mutable source file. Legacy Python presets leave it unset.
+    resolved_config: tyro.conf.Suppress[dict[str, Any] | None] = None
+
     @property
     def assets_dirs(self) -> pathlib.Path:
         """Get the assets directory for this config."""
@@ -910,6 +916,12 @@ def make_univtac_config(
             {"marker_count": pi0_config.TACTILE_MARKER_COUNT}
             if use_tactile
             else None
+        ),
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=1_000,
+            peak_lr=5e-5,
+            decay_steps=30_000,
+            decay_lr=5e-6,
         ),
         weight_loader=weight_loaders.CheckpointWeightLoader("ckpt/pi0_ckpt/pi05_base/params"),
         num_train_steps=4000,
@@ -2552,6 +2564,20 @@ _CONFIGS_DICT = {config.name: config for config in _CONFIGS}
 
 
 def cli() -> TrainConfig:
+    args = sys.argv[1:]
+    config_path = None
+    if args and args[0] == "--config":
+        if len(args) != 2:
+            raise ValueError("--config expects exactly one JSON/YAML path; put experiment parameters in the file.")
+        config_path = args[1]
+    elif len(args) == 1 and args[0].startswith("--config="):
+        config_path = args[0].split("=", 1)[1]
+    elif len(args) == 1 and pathlib.Path(args[0]).suffix.lower() in {".json", ".yaml", ".yml"}:
+        config_path = args[0]
+    if config_path is not None:
+        from openpi.training import experiment_config
+
+        return experiment_config.load_train_config(config_path)
     return tyro.extras.overridable_config_cli({k: (k, v) for k, v in _CONFIGS_DICT.items()})
 
 

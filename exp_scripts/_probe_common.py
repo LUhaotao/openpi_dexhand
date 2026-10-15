@@ -288,7 +288,10 @@ class ProbeContext:
             raise FileNotFoundError(f"Checkpoint directory does not exist: {checkpoint_path}")
 
         base_config = _config.get_config(args.config_name)
-        snapshot = _pi0_config.load_snapshot(checkpoint_path / "model_config")
+        snapshot = _pi0_config.load_snapshot(
+            checkpoint_path / "model_config",
+            config_type=type(base_config.model),
+        )
         model_config = snapshot or base_config.model
         if not isinstance(model_config, _pi0_config.Pi0Config):
             raise TypeError("The JAX observation-transition probe requires a Pi0Config model.")

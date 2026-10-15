@@ -115,11 +115,14 @@ CUDA_VISIBLE_DEVICES=0 XLA_PYTHON_CLIENT_PREALLOCATE=false .venv/bin/python scri
 CUDA_VISIBLE_DEVICES=1 XLA_PYTHON_CLIENT_PREALLOCATE=false .venv/bin/python scripts/serve_policy.py \
   --multi-process-role fm \
   --port 8000 \
+  --save-gate-logs \
   --vlm-host 127.0.0.1 \
   --vlm-port 8001 \
   policy:checkpoint \
   --policy.config pi05_franka_xhand_flower_streaming \
   --policy.dir /path/to/streaming_checkpoint
+
+# --save-gate-logs \ 用来保存门控值的，保存路径是 log/exp_name exp_name通过policy.dir解析
 ```
 
 在 UniVTAC 机器中，将 `policy/streaming_openpi/deploy.yml` 的 `host` 改为推理机器 IP，然后运行：
@@ -143,20 +146,6 @@ checkpoint 必须有与 UniVTAC Panda 8-D qpos 一致的 action space；否则�
     --policy.dir /path/to/streaming_checkpoint
 ```
 
-UniVTAC client命令：
-
-```bash
-
-
-```
-
-### 训练
-```bash
-# 有一个脚本可以用
-# train_pi05_dex.sh
-
-
-```
 
 ### 虚拟实验
 
