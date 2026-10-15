@@ -7,8 +7,8 @@ import dataclasses
 import logging
 import queue
 import threading
-import uuid
 from typing import Any, Literal
+import uuid
 
 import jax
 import jax.numpy as jnp
@@ -479,22 +479,41 @@ class MultiProcessPolicy:
 
     def _stream_infer(self, request: dict[str, Any]) -> dict[str, Any]:
         model = self.policy._model  # noqa: SLF001
-        if not getattr(model, "streaming", False):
-            raise ValueError("stream_infer requires a checkpoint configured with model.streaming=True")
-        session_id = request.get("session_id", "default")
-        execution_id = request.get("executed_action_id")
-        if not isinstance(session_id, str) or not session_id:
-            raise ValueError("session_id must be a non-empty string")
-        if not isinstance(execution_id, int) or isinstance(execution_id, bool) or execution_id < 0:
-            raise ValueError("executed_action_id must be a non-negative integer")
-        chunk_size = int(model.streaming_chunk_size)
-        self._current_chunk_index = execution_id // chunk_size
-        prefix_cache, cache_version, previous_version, cache_observation_chunk_id = self._snapshot_cache()
-        expected = request.get("expected_cache_version")
-        if expected is not None and expected not in (cache_version, previous_version):
-            raise ValueError(
-                f"Cache version mismatch: expected {expected!r}, active {cache_version!r}"
-            )
+        uses_observation_delay_embedding = getattr(model, "observation_delay_max_chunks", 0) > 0
+        if uses_observation_delay_embedding:
+            if not getattr(model, "streaming", False):
+                raise ValueError("stream_infer requires a checkpoint configured with model.streaming=True")
+            session_id = request.get("session_id", "default")
+            execution_id = request.get("executed_action_id")
+            if not isinstance(session_id, str) or not session_id:
+                raise ValueError("session_id must be a non-empty string")
+            if not isinstance(execution_id, int) or isinstance(execution_id, bool) or execution_id < 0:
+                raise ValueError("executed_action_id must be a non-negative integer")
+            chunk_size = int(model.streaming_chunk_size)
+            self._current_chunk_index = execution_id // chunk_size
+            prefix_cache, cache_version, previous_version, cache_observation_chunk_id = self._snapshot_cache()
+            expected = request.get("expected_cache_version")
+            if expected is not None and expected not in (cache_version, previous_version):
+                raise ValueError(
+                    f"Cache version mismatch: expected {expected!r}, active {cache_version!r}"
+                )
+        else:
+            # Preserve the pre-delay-embedding request order. In particular,
+            # snapshot the active/pending cache before validating the request.
+            prefix_cache, cache_version, previous_version, cache_observation_chunk_id = self._snapshot_cache()
+            expected = request.get("expected_cache_version")
+            if expected is not None and expected not in (cache_version, previous_version):
+                raise ValueError(
+                    f"Cache version mismatch: expected {expected!r}, active {cache_version!r}"
+                )
+            if not getattr(model, "streaming", False):
+                raise ValueError("stream_infer requires a checkpoint configured with model.streaming=True")
+            session_id = request.get("session_id", "default")
+            execution_id = request.get("executed_action_id")
+            if not isinstance(session_id, str) or not session_id:
+                raise ValueError("session_id must be a non-empty string")
+            if not isinstance(execution_id, int) or isinstance(execution_id, bool) or execution_id < 0:
+                raise ValueError("executed_action_id must be a non-negative integer")
 
         model_observation = self._prepare(
             request["observation"], session_id=session_id, update_tactile_history=True

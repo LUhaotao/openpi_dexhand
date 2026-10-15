@@ -5,6 +5,7 @@ from types import SimpleNamespace
 
 import jax
 import jax.numpy as jnp
+import pytest
 
 from openpi.policies.multi_process_policy import MultiProcessPolicy
 from openpi.policies.multi_process_policy import _StreamingState
@@ -116,6 +117,44 @@ def test_cache_delay_advances_while_same_prefix_cache_is_active():
     assert int(first_use[0]) == 4
     assert int(next_chunk[0]) == 5
     assert int(after_cache_switch[0]) == 4
+
+
+def test_stream_infer_without_delay_embedding_snapshots_before_request_validation(monkeypatch):
+    policy = object.__new__(MultiProcessPolicy)
+    policy.policy = SimpleNamespace(
+        _model=SimpleNamespace(streaming=True, streaming_chunk_size=5, observation_delay_max_chunks=0)
+    )
+    snapshots = []
+
+    def snapshot():
+        snapshots.append(True)
+        return {}, "cache:1", None, None
+
+    monkeypatch.setattr(policy, "_snapshot_cache", snapshot)
+
+    with pytest.raises(ValueError, match="session_id"):
+        policy._stream_infer({"session_id": "", "executed_action_id": 0})
+
+    assert snapshots == [True]
+
+
+def test_stream_infer_with_delay_embedding_sets_chunk_before_snapshot(monkeypatch):
+    policy = object.__new__(MultiProcessPolicy)
+    policy.policy = SimpleNamespace(
+        _model=SimpleNamespace(streaming=True, streaming_chunk_size=5, observation_delay_max_chunks=6)
+    )
+
+    class SnapshotReachedError(Exception):
+        pass
+
+    def snapshot():
+        assert policy._current_chunk_index == 2
+        raise SnapshotReachedError
+
+    monkeypatch.setattr(policy, "_snapshot_cache", snapshot)
+
+    with pytest.raises(SnapshotReachedError):
+        policy._stream_infer({"session_id": "test", "executed_action_id": 10})
 
 
 def test_seed_streaming_state_keeps_clean_chunk_before_future_window(monkeypatch):
