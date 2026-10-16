@@ -414,7 +414,7 @@ class MultiProcessPolicy:
             self._active_cache_observation_chunk_id = observation_chunk_id
             self._pending_cache = None
 
-    def _snapshot_cache(self) -> tuple[dict[str, Any], str, str | None, int | None]:
+    def _snapshot_cache(self) -> tuple[dict[str, Any], str, str | None, int | None, int]:
         previous_version = self._cache_version
         self._activate_pending()
         with self._cache_lock:
@@ -436,6 +436,7 @@ class MultiProcessPolicy:
                 self._cache_version,
                 previous_version,
                 self._active_cache_observation_chunk_id,
+                self._cache_id,
             )
 
     def _record_observation_start(self, request: dict[str, Any]) -> dict[str, Any]:
@@ -491,7 +492,13 @@ class MultiProcessPolicy:
                 raise ValueError("executed_action_id must be a non-negative integer")
             chunk_size = int(model.streaming_chunk_size)
             self._current_chunk_index = execution_id // chunk_size
-            prefix_cache, cache_version, previous_version, cache_observation_chunk_id = self._snapshot_cache()
+            (
+                prefix_cache,
+                cache_version,
+                previous_version,
+                cache_observation_chunk_id,
+                cache_id,
+            ) = self._snapshot_cache()
             expected = request.get("expected_cache_version")
             if expected is not None and expected not in (cache_version, previous_version):
                 raise ValueError(
@@ -500,7 +507,13 @@ class MultiProcessPolicy:
         else:
             # Preserve the pre-delay-embedding request order. In particular,
             # snapshot the active/pending cache before validating the request.
-            prefix_cache, cache_version, previous_version, cache_observation_chunk_id = self._snapshot_cache()
+            (
+                prefix_cache,
+                cache_version,
+                previous_version,
+                cache_observation_chunk_id,
+                cache_id,
+            ) = self._snapshot_cache()
             expected = request.get("expected_cache_version")
             if expected is not None and expected not in (cache_version, previous_version):
                 raise ValueError(
@@ -522,6 +535,12 @@ class MultiProcessPolicy:
         observation_delay_chunks = self._cache_delay_chunks(
             self._current_chunk_index, cache_observation_chunk_id
         )
+        gate_log_context = {}
+        if getattr(model, "_save_gate_logs", False) and getattr(model, "_gate_log_exp_name", None):
+            gate_log_context = {
+                "gate_log_execution_id": jnp.asarray(execution_id, dtype=jnp.int32),
+                "gate_log_cache_id": jnp.asarray(cache_id, dtype=jnp.int32),
+            }
         if self._streaming_state is None:
             self._streaming_state = self._seed_streaming_state(
                 session_id,
@@ -534,6 +553,7 @@ class MultiProcessPolicy:
                 torque_history=model_observation.torque_history,
                 state_history=model_observation.state_history,
                 observation_delay_chunks=observation_delay_chunks,
+                **gate_log_context,
                 num_steps=int(request.get("num_steps", 10)),
             )
         elif self._streaming_state.session_id != session_id:
@@ -559,6 +579,7 @@ class MultiProcessPolicy:
                     torque_history=model_observation.torque_history,
                     state_history=model_observation.state_history,
                     observation_delay_chunks=observation_delay_chunks,
+                    **gate_log_context,
                 )
                 self._streaming_state.execution_id = execution_id
 
@@ -589,6 +610,8 @@ class MultiProcessPolicy:
         torque_history: Any = None,
         state_history: Any = None,
         observation_delay_chunks: Any = None,
+        gate_log_execution_id: Any = None,
+        gate_log_cache_id: Any = None,
         num_steps: int,
     ) -> _StreamingState:
         if num_steps <= 0:
@@ -605,6 +628,8 @@ class MultiProcessPolicy:
             torque_history=torque_history,
             state_history=state_history,
             observation_delay_chunks=observation_delay_chunks,
+            gate_log_execution_id=gate_log_execution_id,
+            gate_log_cache_id=gate_log_cache_id,
         )
         timestep = self.policy._model.streaming_timestep(actions.dtype)  # noqa: SLF001
         noise = jax.random.normal(noise_rng, actions.shape, dtype=actions.dtype)
@@ -620,7 +645,7 @@ class MultiProcessPolicy:
         return _StreamingState(session_id, execution_id, action_window)
 
     def _infer_fm(self, request: dict[str, Any]) -> dict[str, Any]:
-        prefix_cache, cache_version, previous_version, cache_observation_chunk_id = self._snapshot_cache()
+        prefix_cache, cache_version, previous_version, cache_observation_chunk_id, _ = self._snapshot_cache()
         expected = request.get("expected_cache_version")
         if expected is not None and expected not in (cache_version, previous_version):
             raise ValueError(

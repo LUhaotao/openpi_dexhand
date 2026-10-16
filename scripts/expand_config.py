@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Expand an incremental JAX Pi0.5 JSON/YAML config with configs/default.json."""
+"""Expand an incremental JAX Pi0.5 JSON config with configs/default.json."""
 
 from __future__ import annotations
 
@@ -10,18 +10,18 @@ from openpi.training import experiment_config
 
 
 def _default_output(input_path: pathlib.Path) -> pathlib.Path:
-    return input_path.with_name(f"{input_path.stem}.full.yaml")
+    return input_path.with_name(f"{input_path.stem}.full.json")
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(
         description=(
-            "Deep-merge a JSON/YAML fragment with configs/default.json. Legacy flat "
+            "Deep-merge a JSON fragment with configs/default.json. Legacy flat "
             "model_config/pi0_config.json snapshots are automatically placed under model."
         )
     )
-    parser.add_argument("input", type=pathlib.Path, help="Incremental JSON/YAML file")
-    parser.add_argument("--output", "-o", type=pathlib.Path, help="Output .json/.yaml path")
+    parser.add_argument("input", type=pathlib.Path, help="Incremental JSON file")
+    parser.add_argument("--output", "-o", type=pathlib.Path, help="Output .json path")
     parser.add_argument(
         "--defaults",
         type=pathlib.Path,

@@ -9,8 +9,6 @@ import json
 import pathlib
 from typing import Any
 
-import yaml
-
 from openpi.models import pi0_config
 from openpi.training import optimizer as _optimizer
 from openpi.training import weight_loaders
@@ -27,12 +25,9 @@ class ExperimentConfigError(ValueError):
 def _load_mapping(path: pathlib.Path) -> dict[str, Any]:
     if not path.exists():
         raise FileNotFoundError(path)
-    if path.suffix.lower() == ".json":
-        value = json.loads(path.read_text())
-    elif path.suffix.lower() in {".yaml", ".yml"}:
-        value = yaml.safe_load(path.read_text())
-    else:
-        raise ExperimentConfigError(f"Config must be JSON or YAML: {path}")
+    if path.suffix.lower() != ".json":
+        raise ExperimentConfigError(f"Config must be JSON: {path}")
+    value = json.loads(path.read_text())
     if not isinstance(value, dict):
         raise ExperimentConfigError(f"Config root must be an object: {path}")
     return value
@@ -59,6 +54,18 @@ def _reject_unknown(value: Mapping[str, Any], allowed: set[str], context: str) -
         raise ExperimentConfigError(f"Unknown {context} field(s): {', '.join(unknown)}")
 
 
+def _resolve_derived_fields(value: Mapping[str, Any]) -> dict[str, Any]:
+    """Materialize fields that are implied by other JSON settings."""
+    result = copy.deepcopy(dict(value))
+    model = result.get("model", {})
+    data = result.get("data", {})
+    if data.get("type") == "univtac" and model.get("use_tactile", False):
+        mapping = data.setdefault("repack_mapping", {})
+        mapping.setdefault("left_marker", "observation.tactile.left_marker")
+        mapping.setdefault("right_marker", "observation.tactile.right_marker")
+    return result
+
+
 def expand_config_dict(incremental: Mapping[str, Any], defaults: Mapping[str, Any] | None = None) -> dict[str, Any]:
     """Expand an experiment fragment, including legacy flat Pi0Config snapshots."""
     if defaults is None:
@@ -71,7 +78,7 @@ def expand_config_dict(incremental: Mapping[str, Any], defaults: Mapping[str, An
     # incremental experiment config.
     if incremental and set(incremental) <= model_fields and not (set(incremental) & root_fields):
         incremental = {"model": dict(incremental)}
-    return _deep_merge(defaults, incremental)
+    return _resolve_derived_fields(_deep_merge(defaults, incremental))
 
 
 def load_expanded_config(
@@ -85,12 +92,9 @@ def load_expanded_config(
 def dump_config(config: Mapping[str, Any], path: str | pathlib.Path) -> pathlib.Path:
     path = pathlib.Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    if path.suffix.lower() == ".json":
-        path.write_text(json.dumps(config, indent=2, sort_keys=False) + "\n")
-    elif path.suffix.lower() in {".yaml", ".yml"}:
-        path.write_text(yaml.safe_dump(dict(config), sort_keys=False, allow_unicode=True))
-    else:
-        raise ExperimentConfigError(f"Output must be JSON or YAML: {path}")
+    if path.suffix.lower() != ".json":
+        raise ExperimentConfigError(f"Output must be JSON: {path}")
+    path.write_text(json.dumps(config, indent=2, sort_keys=False) + "\n")
     return path
 
 
@@ -110,7 +114,7 @@ def _model_from_dict(value: Mapping[str, Any]):
         raise ExperimentConfigError(f"Unsupported JAX model type: {model_type!r}")
     model = cls(**value)
     if not model.pi05:
-        raise ExperimentConfigError("Experiment YAML currently supports JAX Pi0.5 only (model.pi05 must be true).")
+        raise ExperimentConfigError("Experiment JSON currently supports JAX Pi0.5 only (model.pi05 must be true).")
     return model
 
 
@@ -132,12 +136,13 @@ def _data_from_dict(value: Mapping[str, Any]):
 
     common = {"repo_id": value.pop("repo_id"), "assets": assets, "base_config": base_config}
     if data_type == "univtac":
-        _reject_unknown(value, {"action_dim", "action_sequence_keys"}, "UniVTAC data")
+        _reject_unknown(value, {"action_dim", "action_sequence_keys", "repack_mapping"}, "UniVTAC data")
         action_dim = value.pop("action_dim")
         if action_dim != 9:
             raise ExperimentConfigError("UniVTAC action_dim is fixed at 9 by the current JAX data adapter.")
         return training_config.LeRobotUniVTACDataConfig(
             **common,
+            repack_mapping=value.pop("repack_mapping"),
             action_sequence_keys=tuple(value.pop("action_sequence_keys")),
         )
     if data_type == "franka_xhand":
@@ -153,24 +158,21 @@ def _data_from_dict(value: Mapping[str, Any]):
             },
             "Franka XHand data",
         )
-        repack_mapping = value.pop("repack_mapping")
-        repack = training_config._transforms.Group(  # noqa: SLF001
-            inputs=[training_config._transforms.RepackTransform(repack_mapping)]  # noqa: SLF001
-        )
         return training_config.LeRobotFrankaXHandDataConfig(
             **common,
-            repack_transforms=repack,
+            repack_mapping=value.pop("repack_mapping"),
             action_sequence_keys=tuple(value.pop("action_sequence_keys")),
             **value,
         )
     if data_type == "bench2dex":
         _reject_unknown(
             value,
-            {"action_dim", "action_sequence_keys", "state_dim", "use_active_dof"},
+            {"action_dim", "action_sequence_keys", "repack_mapping", "state_dim", "use_active_dof"},
             "Bench2Dex data",
         )
         return training_config.Bench2DexDataConfig(
             **common,
+            repack_mapping=value.pop("repack_mapping"),
             action_sequence_keys=tuple(value.pop("action_sequence_keys")),
             **value,
         )
@@ -316,7 +318,7 @@ def train_config_from_dict(value: Mapping[str, Any]):
 
 
 def load_train_config(path: str | pathlib.Path):
-    """Load a JSON/YAML experiment, fill defaults, and return TrainConfig."""
+    """Load a JSON experiment, fill defaults, and return TrainConfig."""
     return train_config_from_dict(load_expanded_config(path))
 
 
@@ -326,4 +328,4 @@ def load_checkpoint_train_config(path: str | pathlib.Path):
     required = {"schema_version", "name", "exp_name", "model", "data"}
     if not required <= set(value):
         return None
-    return train_config_from_dict(value)
+    return train_config_from_dict(expand_config_dict(value))

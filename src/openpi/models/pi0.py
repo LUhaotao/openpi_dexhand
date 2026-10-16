@@ -29,7 +29,7 @@ _GATE_LOG_LOCK = threading.Lock()
 _GATE_PATH_INDEX = itertools.count()
 
 
-def _append_gate_log(exp_name: str, gates) -> None:
+def _append_gate_log(exp_name: str, gates, execution_id=None, cache_id=None) -> None:
     """Append one unified gate evaluation to the experiment CSV on the host."""
     import numpy as np
 
@@ -54,6 +54,18 @@ def _append_gate_log(exp_name: str, gates) -> None:
                     writer.writerow((path_index, chunk_index, log_gate, np.exp(log_gate)))
             file.flush()
             fcntl.flock(file.fileno(), fcntl.LOCK_UN)
+        if execution_id is not None and cache_id is not None:
+            cache_path = _GATE_LOG_DIR / f"{exp_name}-gate-cache.csv"
+            with cache_path.open("a+", newline="") as file:
+                fcntl.flock(file.fileno(), fcntl.LOCK_EX)
+                file.seek(0, 2)
+                write_header = file.tell() == 0
+                writer = csv.writer(file)
+                if write_header:
+                    writer.writerow(("path_index", "execution_id", "cache_id"))
+                writer.writerow((path_index, int(np.asarray(execution_id)), int(np.asarray(cache_id))))
+                file.flush()
+                fcntl.flock(file.fileno(), fcntl.LOCK_UN)
 
 
 def _tactile_gate_bias_init(key, shape, dtype=jnp.float32):
@@ -355,7 +367,13 @@ class Pi0(_model.BaseModel):
         )
 
     def _conditioned_attention_log_gates_from_histories(
-        self, torque_history, tactile_left_marker_history, tactile_right_marker_history, state_history
+        self,
+        torque_history,
+        tactile_left_marker_history,
+        tactile_right_marker_history,
+        state_history,
+        gate_log_execution_id=None,
+        gate_log_cache_id=None,
     ):
         """Encode selected histories independently, then fuse in fixed source order."""
         encoded = []
@@ -410,11 +428,17 @@ class Pi0(_model.BaseModel):
         x = jax.nn.gelu(x + tcn_2(self._causal_conv_inputs(x, dilation=2)))
         log_gates = jax.nn.log_sigmoid(gate_out(x[:, -1, :]).reshape(batch_size, chunk_count))
         if self._save_gate_logs and self._gate_log_exp_name is not None:
-            jax.debug.callback(
-                functools.partial(_append_gate_log, self._gate_log_exp_name),
-                log_gates,
-                ordered=True,
-            )
+            callback = functools.partial(_append_gate_log, self._gate_log_exp_name)
+            if gate_log_execution_id is None or gate_log_cache_id is None:
+                jax.debug.callback(callback, log_gates, ordered=True)
+            else:
+                jax.debug.callback(
+                    callback,
+                    log_gates,
+                    gate_log_execution_id,
+                    gate_log_cache_id,
+                    ordered=True,
+                )
         return log_gates
 
     @staticmethod
@@ -735,6 +759,8 @@ class Pi0(_model.BaseModel):
         torque_history: at.Float[at.Array, "b th td"] | None = None,
         state_history: at.Float[at.Array, "b th s"] | None = None,
         observation_delay_chunks: at.Int[at.Array, "..."] | None = None,
+        gate_log_execution_id: at.Int[at.Array, ""] | None = None,
+        gate_log_cache_id: at.Int[at.Array, ""] | None = None,
     ) -> _model.Actions:
         """Run flow matching using a prefix KV cache produced by ``encode_prefix``."""
         if getattr(self, "use_tactile_adarms", False) and tactile_condition is None:
@@ -742,7 +768,12 @@ class Pi0(_model.BaseModel):
         batch_size = state.shape[0]
         if self.streaming_attention_mode == "attention_gate":
             attention_log_gates = self._conditioned_attention_log_gates_from_histories(
-                torque_history, tactile_left_marker_history, tactile_right_marker_history, state_history
+                torque_history,
+                tactile_left_marker_history,
+                tactile_right_marker_history,
+                state_history,
+                gate_log_execution_id,
+                gate_log_cache_id,
             )
         elif self.streaming_attention_mode == "learnable_gate":
             attention_log_gates = self._learnable_attention_log_gates(batch_size)
@@ -789,6 +820,8 @@ class Pi0(_model.BaseModel):
         torque_history: at.Float[at.Array, "b th td"] | None = None,
         state_history: at.Float[at.Array, "b th s"] | None = None,
         observation_delay_chunks: at.Int[at.Array, "..."] | None = None,
+        gate_log_execution_id: at.Int[at.Array, ""] | None = None,
+        gate_log_cache_id: at.Int[at.Array, ""] | None = None,
     ) -> _model.Actions:
         """Advance a token-wise diffusion-forcing window by completed action chunks."""
         if not self.streaming:
@@ -798,7 +831,12 @@ class Pi0(_model.BaseModel):
         attention_mode = getattr(self, "streaming_attention_mode", None)
         if attention_mode == "attention_gate":
             attention_log_gates = self._conditioned_attention_log_gates_from_histories(
-                torque_history, tactile_left_marker_history, tactile_right_marker_history, state_history
+                torque_history,
+                tactile_left_marker_history,
+                tactile_right_marker_history,
+                state_history,
+                gate_log_execution_id,
+                gate_log_cache_id,
             )
         elif attention_mode == "learnable_gate":
             attention_log_gates = self._learnable_attention_log_gates(state.shape[0])

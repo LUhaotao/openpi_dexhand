@@ -172,3 +172,5 @@ ckpt/
 docs/read_formsf.md
 results/
 log/
+
+configs/experiments

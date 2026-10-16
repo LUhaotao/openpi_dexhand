@@ -317,6 +317,7 @@ class LeRobotUniVTACDataConfig(DataConfigFactory):
     """Data config for the 9-D UniVTAC Franka gripper datasets."""
 
     action_dim: int = 9
+    repack_mapping: tyro.conf.Suppress[dict[str, Any] | None] = None
     base_config: tyro.conf.Suppress[DataConfig | None] = dataclasses.field(
         default_factory=lambda: DataConfig(prompt_from_task=True)
     )
@@ -341,25 +342,30 @@ class LeRobotUniVTACDataConfig(DataConfigFactory):
 
     @override
     def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
-        repack_transforms = self.repack_transforms
-        if getattr(model_config, "use_tactile", False):
+        if self.repack_mapping is not None:
             repack_transforms = _transforms.Group(
-                inputs=[
-                    _transforms.RepackTransform(
-                        {
-                            "images": {
-                                "cam_side": "observation.images.head",
-                                "cam_wrist": "observation.images.wrist",
-                            },
-                            "state": "observation.state",
-                            "left_marker": "observation.tactile.left_marker",
-                            "right_marker": "observation.tactile.right_marker",
-                            "actions": "action",
-                            "prompt": "task",
-                        }
-                    )
-                ]
+                inputs=[_transforms.RepackTransform(self.repack_mapping)]
             )
+        else:
+            repack_transforms = self.repack_transforms
+            if getattr(model_config, "use_tactile", False):
+                repack_transforms = _transforms.Group(
+                    inputs=[
+                        _transforms.RepackTransform(
+                            {
+                                "images": {
+                                    "cam_side": "observation.images.head",
+                                    "cam_wrist": "observation.images.wrist",
+                                },
+                                "state": "observation.state",
+                                "left_marker": "observation.tactile.left_marker",
+                                "right_marker": "observation.tactile.right_marker",
+                                "actions": "action",
+                                "prompt": "task",
+                            }
+                        )
+                    ]
+                )
         return dataclasses.replace(
             self.create_base_config(assets_dirs, model_config),
             repack_transforms=repack_transforms,
@@ -488,6 +494,7 @@ class LeRobotFrankaXHandDataConfig(DataConfigFactory):
     use_delta_hand_actions: bool = False
     default_prompt: str | None = None
     action_dim: int = 18
+    repack_mapping: tyro.conf.Suppress[dict[str, Any] | None] = None
 
     repack_transforms: tyro.conf.Suppress[_transforms.Group] = dataclasses.field(
         default=_transforms.Group(
@@ -528,7 +535,11 @@ class LeRobotFrankaXHandDataConfig(DataConfigFactory):
 
         return dataclasses.replace(
             self.create_base_config(assets_dirs, model_config),
-            repack_transforms=self.repack_transforms,
+            repack_transforms=(
+                self.repack_transforms
+                if self.repack_mapping is None
+                else _transforms.Group(inputs=[_transforms.RepackTransform(self.repack_mapping)])
+            ),
             data_transforms=data_transforms,
             model_transforms=model_transforms,
             action_sequence_keys=self.action_sequence_keys,
@@ -542,6 +553,7 @@ class Bench2DexDataConfig(DataConfigFactory):
     state_dim: int = 48
     action_dim: int = 48
     use_active_dof: bool = False
+    repack_mapping: tyro.conf.Suppress[dict[str, Any] | None] = None
     base_config: tyro.conf.Suppress[DataConfig | None] = dataclasses.field(
         default_factory=lambda: DataConfig(prompt_from_task=True)
     )
@@ -577,7 +589,11 @@ class Bench2DexDataConfig(DataConfigFactory):
             )
         return dataclasses.replace(
             self.create_base_config(assets_dirs, model_config),
-            repack_transforms=self.repack_transforms,
+            repack_transforms=(
+                self.repack_transforms
+                if self.repack_mapping is None
+                else _transforms.Group(inputs=[_transforms.RepackTransform(self.repack_mapping)])
+            ),
             data_transforms=_transforms.Group(
                 inputs=[
                     bench2dex_policy.Bench2DexInputs(
@@ -847,7 +863,7 @@ class TrainConfig:
     # data parallel between 2 groups of devices.
     fsdp_devices: int = 1
 
-    # Fully resolved JSON/YAML source for file-backed JAX experiments. This is
+    # Fully resolved JSON source for file-backed JAX experiments. This is
     # saved with every checkpoint so the run can be inspected independently of
     # the mutable source file. Legacy Python presets leave it unset.
     resolved_config: tyro.conf.Suppress[dict[str, Any] | None] = None
@@ -2568,11 +2584,11 @@ def cli() -> TrainConfig:
     config_path = None
     if args and args[0] == "--config":
         if len(args) != 2:
-            raise ValueError("--config expects exactly one JSON/YAML path; put experiment parameters in the file.")
+            raise ValueError("--config expects exactly one JSON path; put experiment parameters in the file.")
         config_path = args[1]
     elif len(args) == 1 and args[0].startswith("--config="):
         config_path = args[0].split("=", 1)[1]
-    elif len(args) == 1 and pathlib.Path(args[0]).suffix.lower() in {".json", ".yaml", ".yml"}:
+    elif len(args) == 1 and pathlib.Path(args[0]).suffix.lower() == ".json":
         config_path = args[0]
     if config_path is not None:
         from openpi.training import experiment_config

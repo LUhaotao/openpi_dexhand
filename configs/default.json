@@ -40,6 +40,15 @@
     },
     "prompt_from_task": true,
     "action_dim": 9,
+    "repack_mapping": {
+      "images": {
+        "cam_side": "observation.images.head",
+        "cam_wrist": "observation.images.wrist"
+      },
+      "state": "observation.state",
+      "actions": "action",
+      "prompt": "task"
+    },
     "action_sequence_keys": [
       "action"
     ]

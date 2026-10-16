@@ -32,7 +32,7 @@ class Checkpoint:
 
     # Checkpoint directory (e.g., "checkpoints/pi0_aloha_sim/exp/10000").
     dir: str
-    # Legacy training config name (e.g., "pi0_aloha_sim"). Complete YAML
+    # Legacy training config name (e.g., "pi0_aloha_sim"). Complete JSON
     # checkpoints recover this from model_config/pi0_config.json when omitted.
     config: str | None = None
 

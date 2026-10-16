@@ -468,6 +468,24 @@ def test_gate_log_omits_timestamp_and_batch_index(tmp_path, monkeypatch):
     assert rows[1][0:2] == ["0", "0"]
     assert len(rows[1]) == 4
 
+
+def test_gate_log_records_cache_id_by_execution(tmp_path, monkeypatch):
+    monkeypatch.setattr(_pi0, "_GATE_LOG_DIR", tmp_path)
+    monkeypatch.setattr(_pi0, "_GATE_PATH_INDEX", itertools.count())
+
+    _pi0._append_gate_log(  # noqa: SLF001
+        "experiment", np.asarray([[-1.0, -2.0]]), np.asarray(25), np.asarray(7)
+    )
+
+    with (tmp_path / "experiment-gate-cache.csv").open(newline="") as file:
+        rows = list(csv.reader(file))
+
+    assert rows == [
+        ["path_index", "execution_id", "cache_id"],
+        ["0", "25", "7"],
+    ]
+
+
 def test_streaming_attention_mode_is_validated():
     with pytest.raises(ValueError, match="streaming_attention_mode"):
         _pi0_config.Pi0Config(streaming_attention_mode="invalid")

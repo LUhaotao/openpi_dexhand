@@ -10,7 +10,7 @@
 set -euo pipefail
 
 if [[ $# -ne 1 ]]; then
-  echo "Usage: sbatch scripts/train_config.sbatch CONFIG.yaml" >&2
+  echo "Usage: sbatch scripts/train_config.sbatch CONFIG.json" >&2
   exit 2
 fi
 

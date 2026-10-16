@@ -128,7 +128,7 @@ def test_stream_infer_without_delay_embedding_snapshots_before_request_validatio
 
     def snapshot():
         snapshots.append(True)
-        return {}, "cache:1", None, None
+        return {}, "cache:1", None, None, 1
 
     monkeypatch.setattr(policy, "_snapshot_cache", snapshot)
 

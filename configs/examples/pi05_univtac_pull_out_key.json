@@ -1,0 +1,94 @@
+{
+  "schema_version": 1,
+  "name": "pi05_UniVTAC_pull_out_key",
+  "project_name": "openpi",
+  "exp_name": "baseline_seed42",
+  "model": {
+    "type": "pi05",
+    "action_dim": 32,
+    "action_horizon": 50,
+    "max_token_len": 200,
+    "dtype": "bfloat16",
+    "paligemma_variant": "gemma_2b",
+    "action_expert_variant": "gemma_300m",
+    "pi05": true,
+    "gradient_accumulation_steps": 1,
+    "streaming": false,
+    "streaming_chunk_size": 5,
+    "streaming_attention_mode": "bidirectional",
+    "gate_sources": [],
+    "gate_history_length": 10,
+    "streaming_constant_weight": 0.2,
+    "streaming_chunk_wise_weight": 0.8,
+    "streaming_token_wise_weight": 0.0,
+    "observation_delay_max_chunks": 0,
+    "use_observation_delay_embedding": false,
+    "use_tactile": false,
+    "use_torque": false,
+    "torque_dim": 0,
+    "torque_norm_scale": 1.0,
+    "use_tactile_adarms": false,
+    "discrete_state_input": true,
+    "pytorch_compile_mode": "max-autotune"
+  },
+  "data": {
+    "type": "univtac",
+    "repo_id": "/public/node01/users/lvrui/datasets/lerobot/univtac/pull_out_key",
+    "assets": {
+      "assets_dir": null,
+      "asset_id": "/public/node01/users/lvrui/datasets/lerobot/univtac/pull_out_key"
+    },
+    "prompt_from_task": true,
+    "action_dim": 9,
+    "action_sequence_keys": [
+      "action"
+    ],
+    "repack_mapping": {
+      "images": {
+        "cam_side": "observation.images.head",
+        "cam_wrist": "observation.images.wrist"
+      },
+      "state": "observation.state",
+      "actions": "action",
+      "prompt": "task"
+    }
+  },
+  "weight_loader": {
+    "type": "checkpoint",
+    "params_path": "ckpt/pi0_ckpt/pi05_base/params",
+    "missing_regex": ".*lora.*|.*state_proj.*|.*state_gate.*|.*marker_.*|.*tactile_.*|.*learnable_gate.*|.*gate_(fusion|tcn|out).*|.*observation_delay_embedding.*"
+  },
+  "lr_schedule": {
+    "type": "cosine_decay",
+    "warmup_steps": 1000,
+    "peak_lr": 5e-05,
+    "decay_steps": 30000,
+    "decay_lr": 5e-06
+  },
+  "optimizer": {
+    "type": "adamw",
+    "b1": 0.9,
+    "b2": 0.95,
+    "eps": 1e-08,
+    "weight_decay": 1e-10,
+    "clip_gradient_norm": 1.0
+  },
+  "ema_decay": 0.99,
+  "freeze_filter": "none",
+  "freeze_vlm": false,
+  "assets_base_dir": "./assets",
+  "checkpoint_base_dir": "./checkpoints",
+  "seed": 42,
+  "batch_size": 64,
+  "num_workers": 32,
+  "num_train_steps": 4000,
+  "log_interval": 100,
+  "save_interval": 5000,
+  "save_steps": [],
+  "keep_period": 5000,
+  "overwrite": false,
+  "resume": false,
+  "wandb_enabled": true,
+  "policy_metadata": null,
+  "fsdp_devices": 1
+}
