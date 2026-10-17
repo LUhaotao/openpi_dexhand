@@ -133,6 +133,22 @@ bash eval_policy.sh lift_bottle demo streaming_openpi/deploy 0
 
 checkpoint 必须有与 UniVTAC Panda 8-D qpos 一致的 action space；否则要在 `deploy.yml` 显式声明已验证的 `action_indices`。
 
+### Runtime 管理的 VLM/FM（两张 GPU）
+
+这是新增的部署方式，不影响上面的单进程和 `--multi-process` server。Runtime 只暴露一个端口，启动时由它拉起两个私有 worker；`--vlm-cuda-device` 和 `--fm-cuda-device` 使用主机上的 CUDA 编号：
+
+```bash
+XLA_PYTHON_CLIENT_PREALLOCATE=false .venv/bin/python scripts/serve_runtime.py \
+  --port 8000 \
+  --vlm-cuda-device 0 \
+  --fm-cuda-device 1 \
+  policy:checkpoint \
+  --policy.config pi05_franka_xhand_flower_streaming \
+  --policy.dir /path/to/streaming_checkpoint
+```
+
+客户端只连接 `127.0.0.1:8000`。普通 `client.infer(observation)` 会由 Runtime 自动完成 VLM prefix、KV cache 激活和 FM 推理；streaming 请求可以通过 `update_prefix` 控制是否更新视觉上下文。Runtime 的两个 worker 使用随机分配的本机私有端口，原有 VLM/FM 公网端口协议仍然保留。
+
 单进程推理（单进程推理要和单进程训练权重配合使用）：
 
 ```bash

@@ -218,10 +218,17 @@ class MultiProcessPolicy:
             return None
         return self._encode_tactile_jit(observation)
 
-    def _encode_prefix(self, observation: dict[str, Any]) -> dict[str, Any]:
-        observation_request_id = None
-        observation_chunk_id = None
-        if getattr(self.policy._model, "observation_delay_max_chunks", 0) > 0:  # noqa: SLF001
+    def _encode_prefix(
+        self,
+        observation: dict[str, Any],
+        *,
+        observation_chunk_id: int | None = None,
+        observation_request_id: str | None = None,
+    ) -> dict[str, Any]:
+        if (
+            getattr(self.policy._model, "observation_delay_max_chunks", 0) > 0  # noqa: SLF001
+            and observation_chunk_id is None
+        ):
             if self.fm_port is None:
                 raise ValueError("fm_port is required for observation-delay cache numbering")
             from openpi_client.websocket_client_policy import WebsocketClientPolicy
@@ -253,12 +260,63 @@ class MultiProcessPolicy:
             "cache_version": self._cache_version,
         }
 
+    def _encode_prefix_and_get_cache(self, request: dict[str, Any]) -> dict[str, Any]:
+        """Encode a prefix and return its envelope for a Runtime coordinator.
+
+        The legacy VLM endpoint returns only cache metadata from ``encode_prefix`` and
+        exposes the payload through ``get_prefix_cache``.  Runtime uses this combined
+        operation so the coordinator can move the payload to FM without making the
+        client participate in cache management.
+        """
+        self._encode_prefix(
+            request["observation"],
+            observation_chunk_id=request.get("observation_chunk_id"),
+            observation_request_id=request.get("observation_request_id"),
+        )
+        if self._prefix_cache is None:
+            raise RuntimeError("Prefix cache was not created")
+        return self._prefix_cache
+
+    def _activate_prefix(self, request: dict[str, Any]) -> dict[str, Any]:
+        """Activate a VLM cache envelope supplied by the Runtime coordinator."""
+        envelope = request.get("cache")
+        if not isinstance(envelope, dict):
+            raise ValueError("activate_prefix requires a cache envelope")
+        validate_cache_envelope(envelope, model_id=self.model_id)
+        cache = jax.device_put(decode_prefix_cache(envelope["prefix_cache"]))
+        cache = jax.tree.map(
+            lambda value: value.block_until_ready() if hasattr(value, "block_until_ready") else value,
+            cache,
+        )
+        observation_chunk_id = envelope.get("observation_chunk_id")
+        if getattr(self.policy._model, "observation_delay_max_chunks", 0) > 0 and observation_chunk_id is None:  # noqa: SLF001
+            raise ValueError("Delay-conditioned cache is missing its observation chunk marker")
+        with self._cache_lock:
+            self._refresh_generation += 1
+            self._pending_cache = (
+                int(envelope["cache_id"]),
+                envelope["cache_version"],
+                cache,
+                None if observation_chunk_id is None else int(observation_chunk_id),
+            )
+            self._initial_error = None
+            self._initial_ready.set()
+        self._activate_pending()
+        return {
+            "protocol_version": 1,
+            "cache_id": self._cache_id,
+            "cache_version": self._cache_version,
+            "status": "active",
+        }
+
     def infer(self, request: dict[str, Any]) -> dict[str, Any]:
         op = request.get("op", "infer")
         if self.role == "vlm":
             with self._infer_lock:
                 if op == "encode_prefix":
                     return self._encode_prefix(request["observation"])
+                if op == "encode_prefix_and_get_cache":
+                    return self._encode_prefix_and_get_cache(request)
                 if op == "get_prefix_cache":
                     if self._prefix_cache is None:
                         raise RuntimeError("No prefix cache has been encoded")
@@ -269,6 +327,9 @@ class MultiProcessPolicy:
                     return self._prefix_cache
                 raise ValueError(f"Unsupported VLM operation: {op}")
 
+        if op == "activate_prefix":
+            with self._infer_lock:
+                return self._activate_prefix(request)
         if op == "refresh_prefix":
             return self._refresh_prefix(request)
         if op == "observation_started":
