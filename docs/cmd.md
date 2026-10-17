@@ -166,3 +166,41 @@ uv run python -m exp_scripts.jax_obs_transition_probe \
 uv run python -m exp_scripts.jax_obs_transition_probe   --checkpoint /public/node01/users/lvrui/workspace/openpi_dexhand/checkpoints/pi05_franka_xhand_flower_zhb_right_600   --dataset /public/node01/users/lvrui/datasets/lerobot/flower_xhand_franka   --config-name pi05_franka_xhand_flower_v2   --experiment all   --seed 42   --max-pairs 32   --frame-gap 20   --num-noise-samples 1   --save-traces   --output-dir results/pi05_franka_xhand_flower_scalar_anchor
 
 ```
+
+### 工具脚本
+
+生成只包含 `state` 和 `actions` 的 `norm_stats.json`：
+
+```bash
+cd /public/node01/users/lvrui/workspace/openpi_dexhand
+
+# config_name 使用 src/openpi/training/config.py 中已有的 JAX 配置名
+.venv/bin/python scripts/compute_norm_stats.py \
+  pi05_UniVTAC_pull_out_key
+```
+
+脚本会根据配置中的数据集、`action_horizon`、repack mapping 和数据 transform
+遍历数据集，并把结果写入配置对应的 assets 目录。实际写入位置会在命令输出的
+`Writing stats to:` 中显示。需要限制扫描数据量时可以增加：
+
+```bash
+.venv/bin/python scripts/compute_norm_stats.py \
+  pi05_UniVTAC_pull_out_key \
+  --max-frames 100000
+```
+
+将旧的增量 `model_config` 展开为新的完整 JSON 配置：
+
+```bash
+cd /public/node01/users/lvrui/workspace/openpi_dexhand
+
+.venv/bin/python scripts/expand_config.py \
+  /path/to/checkpoint/model_config/pi0_config.json \
+  --defaults configs/default.json \
+  --output configs/experiments/pi05/my_experiment.json
+```
+
+输入也可以是旧的增量实验 JSON。脚本会使用 `configs/default.json` 补齐缺少的
+模型、数据、`repack_mapping`、优化器和训练字段，并输出完整 JSON。旧的
+`pi0_config.json` 只包含模型字段时，转换后需要根据实际实验补充 `name`、
+`exp_name`、数据集路径和 `weight_loader.params_path`。

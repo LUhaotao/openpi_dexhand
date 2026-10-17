@@ -54,6 +54,14 @@ def test_non_json_experiment_is_rejected(tmp_path):
         experiment_config.load_expanded_config(incremental)
 
 
+def test_null_data_type_explains_flower_mapping(tmp_path):
+    value = json.loads(Path("configs/experiments/pi05/real/flower/streaming_state_attention_gate_delay_6.json").read_text())
+    value["data"]["type"] = None
+
+    with pytest.raises(experiment_config.ExperimentConfigError, match="Flower uses 'franka_xhand'"):
+        experiment_config.train_config_from_dict(value)
+
+
 def test_tactile_univtac_snapshot_contains_resolved_marker_mapping():
     value = json.loads(Path("configs/examples/pi05_univtac_pull_out_key.json").read_text())
     value["model"]["use_tactile"] = True

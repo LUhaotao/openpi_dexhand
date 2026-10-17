@@ -130,6 +130,12 @@ def _data_from_dict(value: Mapping[str, Any]):
 
     value = dict(value)
     data_type = value.pop("type")
+    if data_type is None:
+        raise ExperimentConfigError(
+            "data.type is null. Set it to a registered JAX data adapter, for example "
+            "'univtac', 'franka_xhand', 'bench2dex', or 'fake'. "
+            "Flower uses 'franka_xhand'."
+        )
     assets = _assets_from_dict(value.pop("assets"))
     prompt_from_task = bool(value.pop("prompt_from_task"))
     base_config = training_config.DataConfig(prompt_from_task=prompt_from_task)
