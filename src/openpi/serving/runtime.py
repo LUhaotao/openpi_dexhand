@@ -77,15 +77,26 @@ class RuntimeCoordinator:
         """Build a prefix in VLM and activate it in FM through the runtime."""
         request_id = uuid.uuid4().hex
         marker = self._fm_infer({"op": "observation_started", "request_id": request_id})
-        envelope = self._vlm_infer({
-            "op": "encode_prefix_and_get_cache",
+        descriptor = self._vlm_infer({
+            "op": "encode_prefix_to_shared_memory",
             "observation": observation,
             "observation_request_id": request_id,
             "observation_chunk_id": marker.get("observation_chunk_id"),
         })
-        activated = self._fm_infer({"op": "activate_prefix", "cache": envelope})
-        self._cache_id = int(activated["cache_id"])
-        self._cache_version = activated["cache_version"]
+        artifact_id = descriptor.get("artifact_id")
+        try:
+            activated = self._fm_infer({"op": "activate_shared_memory_prefix", "cache": descriptor})
+            self._cache_id = int(activated["cache_id"])
+            self._cache_version = activated["cache_version"]
+        finally:
+            if isinstance(artifact_id, str):
+                try:
+                    self._vlm_infer({"op": "release_shared_memory", "artifact_id": artifact_id})
+                except Exception:
+                    # Preserve an activation error (or the action result) while
+                    # allowing the VLM process's atexit cleanup to reclaim a
+                    # segment if the control connection is already unhealthy.
+                    logger.exception("Failed to release shared-memory artifact %s", artifact_id)
         return {
             "cache_id": self._cache_id,
             "cache_version": self._cache_version,

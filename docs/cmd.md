@@ -147,7 +147,7 @@ XLA_PYTHON_CLIENT_PREALLOCATE=false .venv/bin/python scripts/serve_runtime.py \
   --policy.dir /path/to/streaming_checkpoint
 ```
 
-客户端只连接 `127.0.0.1:8000`。普通 `client.infer(observation)` 会由 Runtime 自动完成 VLM prefix、KV cache 激活和 FM 推理；streaming 请求可以通过 `update_prefix` 控制是否更新视觉上下文。Runtime 的两个 worker 使用随机分配的本机私有端口，原有 VLM/FM 公网端口协议仍然保留。
+客户端只连接 `127.0.0.1:8000`。普通 `client.infer(observation)` 会由 Runtime 自动完成 VLM prefix、KV cache 激活和 FM 推理；streaming 请求可以通过 `update_prefix` 控制是否更新视觉上下文。Runtime 的两个 worker 使用随机分配的本机私有端口，原有 VLM/FM 公网端口协议仍然保留。Runtime 模式下 KV Cache 使用本机 shared memory 传递，私有 WebSocket 只传输 descriptor 和控制事件。
 
 单进程推理（单进程推理要和单进程训练权重配合使用）：
 

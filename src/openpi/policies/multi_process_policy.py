@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import atexit
 import concurrent.futures
 import dataclasses
 import logging
@@ -18,8 +19,11 @@ from openpi.models import model as _model
 from openpi.models import pi0_config as _pi0_config
 from openpi.policies import policy as _policy
 from openpi.serving.multiprocess import decode_prefix_cache
+from openpi.serving.multiprocess import decode_shared_memory_cache
 from openpi.serving.multiprocess import make_cache_envelope
+from openpi.serving.multiprocess import make_shared_memory_cache
 from openpi.serving.multiprocess import validate_cache_envelope
+from openpi.serving.multiprocess import validate_shared_memory_cache
 from openpi.shared import nnx_utils
 
 logger = logging.getLogger(__name__)
@@ -65,6 +69,8 @@ class MultiProcessPolicy:
         self._streaming_state: _StreamingState | None = None
         self._vlm_client = None
         self._fm_client = None
+        self._shared_memory_artifacts: dict[str, Any] = {}
+        atexit.register(self._cleanup_shared_memory_artifacts)
         self._encode_prefix_jit = nnx_utils.module_jit(self.policy._model.encode_prefix)  # noqa: SLF001
         self._encode_tactile_jit = (
             nnx_utils.module_jit(self.policy._model._marker_condition)  # noqa: SLF001
@@ -78,6 +84,15 @@ class MultiProcessPolicy:
         self._advance_streaming_actions_from_prefix_jit = nnx_utils.module_jit(
             self.policy._model.advance_streaming_actions_from_prefix  # noqa: SLF001
         )
+
+    def _cleanup_shared_memory_artifacts(self) -> None:
+        for artifact in self._shared_memory_artifacts.values():
+            try:
+                artifact.close()
+                artifact.unlink()
+            except FileNotFoundError:
+                pass
+        self._shared_memory_artifacts.clear()
 
     @property
     def model_id(self) -> str:
@@ -277,6 +292,40 @@ class MultiProcessPolicy:
             raise RuntimeError("Prefix cache was not created")
         return self._prefix_cache
 
+    def _encode_prefix_to_shared_memory(self, request: dict[str, Any]) -> dict[str, Any]:
+        """Encode a prefix and publish its arrays through shared memory."""
+        observation_request_id = request.get("observation_request_id")
+        observation_chunk_id = request.get("observation_chunk_id")
+        if getattr(self.policy._model, "observation_delay_max_chunks", 0) > 0 and observation_chunk_id is None:  # noqa: SLF001
+            raise ValueError("Delay-conditioned shared-memory cache is missing its observation chunk marker")
+        model_observation = self._prepare(request["observation"])
+        cache = self._encode_prefix_jit(model_observation)
+        self._cache_id += 1
+        self._cache_version = f"{self.model_id}:{self._cache_id}"
+        descriptor, artifact = make_shared_memory_cache(
+            cache,
+            model_id=self.model_id,
+            cache_id=self._cache_id,
+            cache_version=self._cache_version,
+            observation_request_id=observation_request_id,
+            observation_chunk_id=observation_chunk_id,
+        )
+        self._shared_memory_artifacts[descriptor["artifact_id"]] = artifact
+        return descriptor
+
+    def _release_shared_memory(self, request: dict[str, Any]) -> dict[str, Any]:
+        artifact_id = request.get("artifact_id")
+        if not isinstance(artifact_id, str) or not artifact_id:
+            raise ValueError("release_shared_memory requires an artifact_id")
+        artifact = self._shared_memory_artifacts.pop(artifact_id, None)
+        if artifact is not None:
+            try:
+                artifact.close()
+                artifact.unlink()
+            except FileNotFoundError:
+                pass
+        return {"protocol_version": 1, "artifact_id": artifact_id, "status": "released"}
+
     def _activate_prefix(self, request: dict[str, Any]) -> dict[str, Any]:
         """Activate a VLM cache envelope supplied by the Runtime coordinator."""
         envelope = request.get("cache")
@@ -309,6 +358,47 @@ class MultiProcessPolicy:
             "status": "active",
         }
 
+    def _activate_shared_memory_prefix(self, request: dict[str, Any]) -> dict[str, Any]:
+        """Copy a shared-memory cache into the FM device and activate it."""
+        descriptor = request.get("cache")
+        if not isinstance(descriptor, dict):
+            raise ValueError("activate_shared_memory_prefix requires a cache descriptor")
+        validate_shared_memory_cache(descriptor, model_id=self.model_id)
+        from multiprocessing import shared_memory
+
+        artifact = shared_memory.SharedMemory(name=descriptor["shared_memory_name"], create=False)
+        try:
+            if artifact.size < int(descriptor["payload_size"]):
+                raise ValueError("Shared-memory cache segment is smaller than its descriptor")
+            host_cache = decode_shared_memory_cache(descriptor["tree"], artifact.buf)
+            cache = jax.device_put(host_cache)
+            cache = jax.tree.map(
+                lambda value: value.block_until_ready() if hasattr(value, "block_until_ready") else value,
+                cache,
+            )
+        finally:
+            artifact.close()
+        observation_chunk_id = descriptor.get("observation_chunk_id")
+        if getattr(self.policy._model, "observation_delay_max_chunks", 0) > 0 and observation_chunk_id is None:  # noqa: SLF001
+            raise ValueError("Delay-conditioned cache is missing its observation chunk marker")
+        with self._cache_lock:
+            self._refresh_generation += 1
+            self._pending_cache = (
+                int(descriptor["cache_id"]),
+                descriptor["cache_version"],
+                cache,
+                None if observation_chunk_id is None else int(observation_chunk_id),
+            )
+            self._initial_error = None
+            self._initial_ready.set()
+        self._activate_pending()
+        return {
+            "protocol_version": 1,
+            "cache_id": self._cache_id,
+            "cache_version": self._cache_version,
+            "status": "active",
+        }
+
     def infer(self, request: dict[str, Any]) -> dict[str, Any]:
         op = request.get("op", "infer")
         if self.role == "vlm":
@@ -317,6 +407,10 @@ class MultiProcessPolicy:
                     return self._encode_prefix(request["observation"])
                 if op == "encode_prefix_and_get_cache":
                     return self._encode_prefix_and_get_cache(request)
+                if op == "encode_prefix_to_shared_memory":
+                    return self._encode_prefix_to_shared_memory(request)
+                if op == "release_shared_memory":
+                    return self._release_shared_memory(request)
                 if op == "get_prefix_cache":
                     if self._prefix_cache is None:
                         raise RuntimeError("No prefix cache has been encoded")
@@ -330,6 +424,9 @@ class MultiProcessPolicy:
         if op == "activate_prefix":
             with self._infer_lock:
                 return self._activate_prefix(request)
+        if op == "activate_shared_memory_prefix":
+            with self._infer_lock:
+                return self._activate_shared_memory_prefix(request)
         if op == "refresh_prefix":
             return self._refresh_prefix(request)
         if op == "observation_started":

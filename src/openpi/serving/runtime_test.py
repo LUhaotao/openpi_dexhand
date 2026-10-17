@@ -13,16 +13,19 @@ class _FakeClient:
     def infer(self, request):
         self.calls.append((self.role, request))
         if self.role == "vlm":
+            if request["op"] == "release_shared_memory":
+                return {"status": "released"}
             return {
                 "protocol_version": 1,
                 "model_id": "model",
                 "cache_id": 3,
                 "cache_version": "model:3",
-                "prefix_cache": {"cache": 1},
+                "artifact_id": "artifact-3",
+                "transport": "shared_memory",
             }
         if request["op"] == "observation_started":
             return {"observation_chunk_id": 4}
-        if request["op"] == "activate_prefix":
+        if request["op"] == "activate_shared_memory_prefix":
             return {"cache_id": 3, "cache_version": "model:3", "status": "active"}
         if request["op"] == "reset_stream":
             return {"status": "reset", "prefix_cache_cleared": request["clear_prefix_cache"]}
@@ -47,12 +50,13 @@ def test_runtime_coordinates_prefix_activation_and_inference(monkeypatch):
     result = coordinator.infer_with_session({"observation": {"state": [0]}}, session_id="robot-1")
 
     assert result == {"actions": [1], "cache_version": "model:3"}
-    assert [role for role, _ in calls] == ["fm", "vlm", "fm", "fm"]
+    assert [role for role, _ in calls] == ["fm", "vlm", "fm", "vlm", "fm"]
     assert calls[0][1]["op"] == "observation_started"
-    assert calls[1][1]["op"] == "encode_prefix_and_get_cache"
+    assert calls[1][1]["op"] == "encode_prefix_to_shared_memory"
     assert calls[1][1]["observation_chunk_id"] == 4
-    assert calls[2][1]["op"] == "activate_prefix"
-    assert calls[3][1]["session_id"] == "robot-1"
+    assert calls[2][1]["op"] == "activate_shared_memory_prefix"
+    assert calls[3][1]["op"] == "release_shared_memory"
+    assert calls[4][1]["session_id"] == "robot-1"
 
 
 def test_runtime_stream_reuses_prefix_when_requested(monkeypatch):
@@ -77,5 +81,5 @@ def test_runtime_stream_reuses_prefix_when_requested(monkeypatch):
         "update_prefix": False,
     })
 
-    assert len([request for role, request in calls if role == "vlm"]) == 1
+    assert len([request for role, request in calls if role == "vlm" and request["op"] == "encode_prefix_to_shared_memory"]) == 1
     assert len([request for role, request in calls if role == "fm" and request["op"] == "stream_infer"]) == 2

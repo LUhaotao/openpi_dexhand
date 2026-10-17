@@ -2,9 +2,12 @@ import numpy as np
 from openpi_client import msgpack_numpy
 
 from openpi.serving.multiprocess import decode_prefix_cache
+from openpi.serving.multiprocess import decode_shared_memory_cache
 from openpi.serving.multiprocess import encode_prefix_cache
 from openpi.serving.multiprocess import make_cache_envelope
+from openpi.serving.multiprocess import make_shared_memory_cache
 from openpi.serving.multiprocess import validate_cache_envelope
+from openpi.serving.multiprocess import validate_shared_memory_cache
 
 
 def test_prefix_cache_round_trip_preserves_arrays_and_metadata():
@@ -45,6 +48,32 @@ def test_decode_prefix_cache_restores_kv_cache_tuple_after_msgpack():
     wire = msgpack_numpy.unpackb(msgpack_numpy.packb(encode_prefix_cache(cache)))
     restored = decode_prefix_cache(wire)
     assert isinstance(restored["kv_cache"], tuple)
+
+
+def test_shared_memory_cache_round_trip_preserves_pytree_and_dtype():
+    cache = {
+        "kv_cache": (
+            np.arange(12, dtype=np.float32).reshape(3, 4),
+            np.ones((2,), dtype=np.dtype("bfloat16")),
+        ),
+        "prefix_mask": np.asarray([[True, False]]),
+    }
+    descriptor, artifact = make_shared_memory_cache(
+        cache,
+        model_id="pi05",
+        cache_id=4,
+        cache_version="pi05:4",
+    )
+    try:
+        validate_shared_memory_cache(descriptor, model_id="pi05")
+        restored = decode_shared_memory_cache(descriptor["tree"], artifact.buf)
+        assert np.array_equal(restored["kv_cache"][0], cache["kv_cache"][0])
+        assert np.array_equal(restored["kv_cache"][1], cache["kv_cache"][1])
+        assert restored["kv_cache"][1].dtype == np.dtype("bfloat16")
+        assert np.array_equal(restored["prefix_mask"], cache["prefix_mask"])
+    finally:
+        artifact.close()
+        artifact.unlink()
 
 
 def test_fm_request_can_select_noise_token_count():
