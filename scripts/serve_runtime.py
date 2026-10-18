@@ -13,11 +13,14 @@ import multiprocessing
 import os
 import socket
 import time
+from typing import Literal
 
 import tyro
 
 from openpi.serving import runtime as _runtime
 from openpi.serving import websocket_policy_server
+from openpi.serving.backends import LocalBackend
+from openpi.serving.backends import ProcessBackend
 
 # Reuse the existing checkpoint/environment argument types and policy loader only
 # inside worker processes.  Importing this module does not create a policy or touch
@@ -44,12 +47,16 @@ class Args:
     env: EnvMode = EnvMode.ALOHA_SIM
     default_prompt: str | None = None
     port: int = 8000
+    mode: Literal["process", "local"] = "process"
     save_gate_logs: bool = False
     worker_start_timeout: float = 300.0
     # These are physical CUDA device indices on the host.  The worker process sees
     # its selected device as local device 0 after CUDA_VISIBLE_DEVICES is applied.
     vlm_cuda_device: int = 0
     fm_cuda_device: int = 1
+    # Local mode uses the process's normal CUDA visibility.  Set this only when
+    # JAX is not initialized by the parent environment yet.
+    cuda_device: int | None = None
     policy: Checkpoint | Default = dataclasses.field(default_factory=Default)
 
 
@@ -121,9 +128,43 @@ def _terminate_workers(processes: list[multiprocessing.Process]) -> None:
             process.join(timeout=10)
 
 
+def _serve_local(args: Args) -> None:
+    if args.cuda_device is not None:
+        if args.cuda_device < 0:
+            raise ValueError("cuda_device must be non-negative")
+        os.environ["CUDA_VISIBLE_DEVICES"] = str(args.cuda_device)
+    policy_args = _serve_policy.Args(
+        env=args.env,
+        default_prompt=args.default_prompt,
+        port=args.port,
+        record=False,
+        save_gate_logs=args.save_gate_logs,
+        multi_process=False,
+        policy=args.policy,
+    )
+    policy = _serve_policy.create_policy(policy_args)
+    backend = LocalBackend(policy)
+    coordinator = _runtime.RuntimeCoordinator(backend)
+    coordinator.warmup()
+    metadata = {**coordinator.metadata, "runtime": "local"}
+    server = websocket_policy_server.WebsocketPolicyServer(
+        policy=coordinator,
+        host="0.0.0.0",
+        port=args.port,
+        metadata=metadata,
+    )
+    try:
+        server.serve_forever()
+    finally:
+        coordinator.close()
+
+
 def main(args: Args) -> None:
     if not 1 <= args.port <= 65535:
         raise ValueError("port must be in [1, 65535]")
+    if args.mode == "local":
+        _serve_local(args)
+        return
     if args.vlm_cuda_device < 0 or args.fm_cuda_device < 0:
         raise ValueError("CUDA device indices must be non-negative")
     if args.vlm_cuda_device == args.fm_cuda_device:
@@ -161,7 +202,7 @@ def main(args: Args) -> None:
             process.start()
         _wait_for_worker(fm_process, fm_port, args.worker_start_timeout)
         _wait_for_worker(vlm_process, vlm_port, args.worker_start_timeout)
-        coordinator = _runtime.RuntimeCoordinator(
+        backend = ProcessBackend(
             vlm_host="127.0.0.1",
             vlm_port=vlm_port,
             fm_host="127.0.0.1",
@@ -172,11 +213,9 @@ def main(args: Args) -> None:
                 "fm_cuda_device": args.fm_cuda_device,
             },
         )
+        coordinator = _runtime.RuntimeCoordinator(backend)
+        coordinator.warmup()
         metadata = coordinator.metadata
-        metadata.update({
-            "vlm_worker_metadata": coordinator._vlm.get_server_metadata(),  # noqa: SLF001
-            "fm_worker_metadata": coordinator._fm.get_server_metadata(),  # noqa: SLF001
-        })
         logger.info(
             "Runtime listening on 0.0.0.0:%s (VLM CUDA %s, FM CUDA %s)",
             args.port,

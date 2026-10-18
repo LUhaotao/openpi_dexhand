@@ -62,7 +62,7 @@ class MultiProcessPolicy:
         self._infer_lock = threading.Lock()
         self._refresh_queue: queue.Queue[tuple[int, dict[str, Any], concurrent.futures.Future | None]] = queue.Queue(maxsize=1)
         self._refresh_generation = 0
-        if self.role == "fm":
+        if self.role == "fm" and self.vlm_port is not None:
             self._refresh_thread = threading.Thread(target=self._refresh_loop, daemon=True)
             self._refresh_thread.start()
         # ponytail: one active stream per FM server; use a session map only for multi-robot serving.
@@ -232,6 +232,47 @@ class MultiProcessPolicy:
         if self._encode_tactile_jit is None:
             return None
         return self._encode_tactile_jit(observation)
+
+    def encode_prefix_local(
+        self,
+        observation: dict[str, Any],
+        *,
+        session_id: str,
+        executed_action_id: int | None = None,
+    ) -> Any:
+        """Compute and activate a prefix without serialization or IPC."""
+        model_observation = self._prepare(observation, session_id=session_id)
+        cache = self._encode_prefix_jit(model_observation)
+        self._cache_id += 1
+        self._cache_version = f"{self.model_id}:{self._cache_id}"
+        observation_chunk_id = None
+        if getattr(self.policy._model, "observation_delay_max_chunks", 0) > 0:  # noqa: SLF001
+            if executed_action_id is None:
+                raise ValueError("executed_action_id is required for observation-delay caches")
+            chunk_size = int(self.policy._model.streaming_chunk_size)  # noqa: SLF001
+            self._current_chunk_index = executed_action_id // chunk_size
+            observation_chunk_id = self._current_chunk_index
+        self._prefix_cache = cache
+        self._active_cache_observation_chunk_id = observation_chunk_id
+        self._streaming_state = None
+        self._initial_error = None
+        self._initial_ready.set()
+        return {
+            "cache_id": self._cache_id,
+            "cache_version": self._cache_version,
+            "cache": cache,
+            "observation_chunk_id": observation_chunk_id,
+        }
+
+    def activate_local_prefix(self, cache: Any, *, cache_id: int, cache_version: str, observation_chunk_id: int | None = None) -> None:
+        """Activate a JAX prefix produced by :meth:`encode_prefix_local`."""
+        self._cache_id = int(cache_id)
+        self._cache_version = cache_version
+        self._prefix_cache = cache
+        self._active_cache_observation_chunk_id = observation_chunk_id
+        self._streaming_state = None
+        self._initial_error = None
+        self._initial_ready.set()
 
     def _encode_prefix(
         self,

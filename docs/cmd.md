@@ -135,7 +135,7 @@ checkpoint 必须有与 UniVTAC Panda 8-D qpos 一致的 action space；否则�
 
 ### Runtime 管理的 VLM/FM（两张 GPU）
 
-这是新增的部署方式，不影响上面的单进程和 `--multi-process` server。Runtime 只暴露一个端口，启动时由它拉起两个私有 worker；`--vlm-cuda-device` 和 `--fm-cuda-device` 使用主机上的 CUDA 编号：
+这是新增的统一 Runtime 部署入口，不影响上面的单进程和 `--multi-process` server。默认 `--mode process` 时，Runtime 只暴露一个端口并拉起两个私有 worker；`--vlm-cuda-device` 和 `--fm-cuda-device` 使用主机上的 CUDA 编号。KV Cache 使用本机 shared memory 传递，worker WebSocket 只传控制事件和 descriptor：
 
 ```bash
 XLA_PYTHON_CLIENT_PREALLOCATE=false .venv/bin/python scripts/serve_runtime.py \
@@ -147,7 +147,19 @@ XLA_PYTHON_CLIENT_PREALLOCATE=false .venv/bin/python scripts/serve_runtime.py \
   --policy.dir /path/to/streaming_checkpoint
 ```
 
-客户端只连接 `127.0.0.1:8000`。普通 `client.infer(observation)` 会由 Runtime 自动完成 VLM prefix、KV cache 激活和 FM 推理；streaming 请求可以通过 `update_prefix` 控制是否更新视觉上下文。Runtime 的两个 worker 使用随机分配的本机私有端口，原有 VLM/FM 公网端口协议仍然保留。Runtime 模式下 KV Cache 使用本机 shared memory 传递，私有 WebSocket 只传输 descriptor 和控制事件。
+客户端只连接 `127.0.0.1:8000`。普通 `client.infer(observation)` 会由 Runtime 自动完成 VLM prefix、KV cache 激活和 FM 推理；streaming 请求可以通过 `update_prefix` 控制是否更新视觉上下文。Runtime 的两个 worker 使用随机分配的本机私有端口，原有 VLM/FM 公网端口协议仍然保留。
+
+单进程也可使用相同 Runtime API，将 backend 切到 `local`。此模式只加载一个本地 JAX policy，KV Cache 直接作为 JAX pytree 传递，不使用 worker WebSocket 或 shared memory：
+
+```bash
+.venv/bin/python scripts/serve_runtime.py \
+  --mode local \
+  --cuda-device 0 \
+  --port 8000 \
+  policy:checkpoint \
+  --policy.config pi05_franka_xhand_flower_streaming \
+  --policy.dir /path/to/streaming_checkpoint
+```
 
 单进程推理（单进程推理要和单进程训练权重配合使用）：
 
