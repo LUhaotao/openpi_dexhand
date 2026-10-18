@@ -68,7 +68,12 @@ class FakePolicy:
 def _instrument_role(role_policy: _multi_process_policy.MultiProcessPolicy) -> None:
     """Attach model-only timing around the role's jitted model calls."""
     role_policy._last_model_ms = 0.0  # noqa: SLF001
-    for name in ("_encode_prefix_jit", "_sample_actions_from_prefix_jit", "_advance_streaming_actions_from_prefix_jit"):
+    for name in (
+        "_encode_prefix_jit",
+        "_sample_actions_from_prefix_jit",
+        "_advance_streaming_actions_from_prefix_jit",
+        "_advance_streaming_head_from_prefix_jit",
+    ):
         if not hasattr(role_policy, name):
             continue
         original = getattr(role_policy, name)

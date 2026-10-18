@@ -34,6 +34,7 @@ class _StreamingState:
     session_id: str
     execution_id: int
     action_window: Any
+    timestep_window: Any | None = None
 
 
 @dataclasses.dataclass
@@ -44,10 +45,13 @@ class MultiProcessPolicy:
     vlm_port: int | None = None
     fm_host: str = "127.0.0.1"
     fm_port: int | None = None
+    streaming_inference_mode: Literal["chunk", "action_head"] = "chunk"
 
     def __post_init__(self):
         if self.role not in ("vlm", "fm"):
             raise ValueError(f"Unknown multi-process role: {self.role}")
+        if self.streaming_inference_mode not in ("chunk", "action_head"):
+            raise ValueError("streaming_inference_mode must be 'chunk' or 'action_head'")
         self._rng = jax.random.key(0)
         self._cache_id = 0
         self._cache_version: str | None = None
@@ -83,6 +87,9 @@ class MultiProcessPolicy:
         )
         self._advance_streaming_actions_from_prefix_jit = nnx_utils.module_jit(
             self.policy._model.advance_streaming_actions_from_prefix  # noqa: SLF001
+        )
+        self._advance_streaming_head_from_prefix_jit = nnx_utils.module_jit(
+            self.policy._model.advance_streaming_head_from_prefix  # noqa: SLF001
         )
 
     def _cleanup_shared_memory_artifacts(self) -> None:
@@ -205,20 +212,36 @@ class MultiProcessPolicy:
         self._block_until_ready(actions)
         if getattr(self.policy._model, "streaming", False):  # noqa: SLF001
             chunk_size = int(self.policy._model.streaming_chunk_size)  # noqa: SLF001
-            action_buffer = jnp.concatenate([actions[:, :chunk_size], actions], axis=1)
-            advanced = self._advance_streaming_actions_from_prefix_jit(
-                jax.random.key(1),
-                observation.state,
-                prefix_cache,
-                action_buffer,
-                jnp.asarray(1, dtype=jnp.int32),
-                tactile_condition=tactile_condition,
-                tactile_left_marker_history=observation.tactile_left_marker_history,
-                tactile_right_marker_history=observation.tactile_right_marker_history,
-                torque_history=observation.torque_history,
-                state_history=observation.state_history,
-                observation_delay_chunks=observation.observation_delay_chunks,
-            )
+            if getattr(self, "streaming_inference_mode", "chunk") == "action_head":
+                timestep = self.policy._model.streaming_timestep(actions.dtype)  # noqa: SLF001
+                advanced = self._advance_streaming_head_from_prefix_jit(
+                    observation.state,
+                    prefix_cache,
+                    actions[:, :1],
+                    timestep[None, :1],
+                    jnp.zeros((actions.shape[0], 1), dtype=actions.dtype),
+                    tactile_condition=tactile_condition,
+                    tactile_left_marker_history=observation.tactile_left_marker_history,
+                    tactile_right_marker_history=observation.tactile_right_marker_history,
+                    torque_history=observation.torque_history,
+                    state_history=observation.state_history,
+                    observation_delay_chunks=observation.observation_delay_chunks,
+                )
+            else:
+                action_buffer = jnp.concatenate([actions[:, :chunk_size], actions], axis=1)
+                advanced = self._advance_streaming_actions_from_prefix_jit(
+                    jax.random.key(1),
+                    observation.state,
+                    prefix_cache,
+                    action_buffer,
+                    jnp.asarray(1, dtype=jnp.int32),
+                    tactile_condition=tactile_condition,
+                    tactile_left_marker_history=observation.tactile_left_marker_history,
+                    tactile_right_marker_history=observation.tactile_right_marker_history,
+                    torque_history=observation.torque_history,
+                    state_history=observation.state_history,
+                    observation_delay_chunks=observation.observation_delay_chunks,
+                )
             self._block_until_ready(advanced)
 
     @staticmethod
@@ -679,6 +702,7 @@ class MultiProcessPolicy:
 
     def _stream_infer(self, request: dict[str, Any]) -> dict[str, Any]:
         model = self.policy._model  # noqa: SLF001
+        streaming_mode = getattr(self, "streaming_inference_mode", "chunk")
         uses_observation_delay_embedding = getattr(model, "observation_delay_max_chunks", 0) > 0
         if uses_observation_delay_embedding:
             if not getattr(model, "streaming", False):
@@ -755,35 +779,58 @@ class MultiProcessPolicy:
                 **gate_log_context,
                 num_steps=int(request.get("num_steps", 10)),
             )
+            if streaming_mode == "action_head":
+                self._streaming_head_step(
+                    self._streaming_state,
+                    model_observation,
+                    prefix_cache,
+                    tactile_condition=tactile_condition,
+                    observation_delay_chunks=observation_delay_chunks,
+                    gate_log_context=gate_log_context,
+                    consume=False,
+                )
         elif self._streaming_state.session_id != session_id:
             raise RuntimeError("A different stream session is active; call reset_stream first")
         else:
             completed_actions = execution_id - self._streaming_state.execution_id
             if completed_actions < 0:
                 raise ValueError("executed_action_id cannot move backwards within a stream session")
-            chunk_size = int(model.streaming_chunk_size)
-            if completed_actions % chunk_size:
-                raise ValueError("executed_action_id must advance by whole streaming chunks")
             if completed_actions:
-                self._rng, advance_rng = jax.random.split(self._rng)
-                self._streaming_state.action_window = self._advance_streaming_actions_from_prefix_jit(
-                    advance_rng,
-                    model_observation.state,
-                    prefix_cache,
-                    self._streaming_state.action_window,
-                    jnp.asarray(completed_actions // chunk_size, dtype=jnp.int32),
-                    tactile_condition=tactile_condition,
-                    tactile_left_marker_history=model_observation.tactile_left_marker_history,
-                    tactile_right_marker_history=model_observation.tactile_right_marker_history,
-                    torque_history=model_observation.torque_history,
-                    state_history=model_observation.state_history,
-                    observation_delay_chunks=observation_delay_chunks,
-                    **gate_log_context,
-                )
+                if streaming_mode == "action_head":
+                    for _ in range(completed_actions):
+                        self._streaming_head_step(
+                            self._streaming_state,
+                            model_observation,
+                            prefix_cache,
+                            tactile_condition=tactile_condition,
+                            observation_delay_chunks=observation_delay_chunks,
+                            gate_log_context=gate_log_context,
+                            consume=True,
+                        )
+                else:
+                    chunk_size = int(model.streaming_chunk_size)
+                    if completed_actions % chunk_size:
+                        raise ValueError("executed_action_id must advance by whole streaming chunks")
+                    self._rng, advance_rng = jax.random.split(self._rng)
+                    self._streaming_state.action_window = self._advance_streaming_actions_from_prefix_jit(
+                        advance_rng,
+                        model_observation.state,
+                        prefix_cache,
+                        self._streaming_state.action_window,
+                        jnp.asarray(completed_actions // chunk_size, dtype=jnp.int32),
+                        tactile_condition=tactile_condition,
+                        tactile_left_marker_history=model_observation.tactile_left_marker_history,
+                        tactile_right_marker_history=model_observation.tactile_right_marker_history,
+                        torque_history=model_observation.torque_history,
+                        state_history=model_observation.state_history,
+                        observation_delay_chunks=observation_delay_chunks,
+                        **gate_log_context,
+                    )
                 self._streaming_state.execution_id = execution_id
 
         chunk_size = int(model.streaming_chunk_size)
-        actions = self._streaming_state.action_window[:, :chunk_size]
+        action_count = 1 if streaming_mode == "action_head" else chunk_size
+        actions = self._streaming_state.action_window[:, :action_count]
         result = self.policy._output_transform(  # noqa: SLF001
             {"state": np.asarray(model_observation.state[0]), "actions": np.asarray(actions[0])}
         )
@@ -792,7 +839,8 @@ class MultiProcessPolicy:
             "session_id": session_id,
             "execution_id": execution_id,
             "cache_version": cache_version,
-            "action_count": chunk_size,
+            "action_count": action_count,
+            "inference_mode": streaming_mode,
         }
         return result
 
@@ -833,6 +881,20 @@ class MultiProcessPolicy:
         timestep = self.policy._model.streaming_timestep(actions.dtype)  # noqa: SLF001
         noise = jax.random.normal(noise_rng, actions.shape, dtype=actions.dtype)
         chunk_size = int(self.policy._model.streaming_chunk_size)  # noqa: SLF001
+        if getattr(self, "streaming_inference_mode", "chunk") == "action_head":
+            # Keep each action at its own chunk timestep. The head-only path
+            # updates only the queue head; all tail entries keep this stored
+            # timestep until they reach the head.
+            noisy_actions = (
+                timestep[None, :, None] * noise
+                + (1.0 - timestep[None, :, None]) * actions
+            )
+            action_window = jnp.concatenate([noisy_actions, noise[:, -chunk_size:]], axis=1)
+            timestep_window = jnp.concatenate(
+                [timestep, jnp.ones((chunk_size,), dtype=timestep.dtype)], axis=0
+            )
+            return _StreamingState(session_id, execution_id, action_window, timestep_window)
+
         future_timestep = timestep[:-chunk_size]
         # ponytail: seed from a full sample plus the training marginal; retain an ODE trajectory only if cold starts need it.
         future_window = (
@@ -842,6 +904,61 @@ class MultiProcessPolicy:
         # The ready chunk stays outside the H-token future window passed to FM.
         action_window = jnp.concatenate([actions[:, :chunk_size], future_window, noise[:, -chunk_size:]], axis=1)
         return _StreamingState(session_id, execution_id, action_window)
+
+    def _streaming_head_step(
+        self,
+        stream_state: _StreamingState,
+        model_observation: _model.Observation,
+        prefix_cache: dict[str, Any],
+        *,
+        tactile_condition: Any,
+        observation_delay_chunks: Any,
+        gate_log_context: dict[str, Any],
+        consume: bool,
+    ) -> None:
+        """Update one queue head and leave all tail actions untouched."""
+        if stream_state.timestep_window is None:
+            raise RuntimeError("Action-head streaming state is missing timestep metadata")
+
+        action_window = stream_state.action_window
+        timestep_window = stream_state.timestep_window
+        if consume:
+            self._rng, noise_rng = jax.random.split(self._rng)
+            fresh_noise = jax.random.normal(
+                noise_rng,
+                (action_window.shape[0], 1, action_window.shape[2]),
+                dtype=action_window.dtype,
+            )
+            action_window = jnp.concatenate([action_window[:, 1:], fresh_noise], axis=1)
+            timestep_window = jnp.concatenate(
+                [timestep_window[1:], jnp.ones((1,), dtype=timestep_window.dtype)], axis=0
+            )
+
+        head = action_window[:, :1]
+        current_timestep = jnp.broadcast_to(
+            timestep_window[:1][None, :], (head.shape[0], 1)
+        ).astype(head.dtype)
+        target_timestep = jnp.zeros_like(current_timestep)
+        updated_head = self._advance_streaming_head_from_prefix_jit(
+            model_observation.state,
+            prefix_cache,
+            head,
+            current_timestep,
+            target_timestep,
+            tactile_condition=tactile_condition,
+            tactile_left_marker_history=model_observation.tactile_left_marker_history,
+            tactile_right_marker_history=model_observation.tactile_right_marker_history,
+            torque_history=model_observation.torque_history,
+            state_history=model_observation.state_history,
+            observation_delay_chunks=observation_delay_chunks,
+            **gate_log_context,
+        )
+        stream_state.action_window = jnp.concatenate(
+            [updated_head, action_window[:, 1:]], axis=1
+        )
+        stream_state.timestep_window = jnp.concatenate(
+            [jnp.zeros((1,), dtype=timestep_window.dtype), timestep_window[1:]], axis=0
+        )
 
     def _infer_fm(self, request: dict[str, Any]) -> dict[str, Any]:
         prefix_cache, cache_version, previous_version, cache_observation_chunk_id, _ = self._snapshot_cache()

@@ -69,6 +69,10 @@ class Args:
     fm_host: str = "127.0.0.1"
     # Serve one role only. Use this to pin VLM and FM to separate GPUs.
     multi_process_role: Literal["vlm", "fm"] | None = None
+    # Streaming inference implementation used by the FM worker. ``chunk``
+    # preserves the existing behavior; ``action_head`` updates one queue head
+    # per request and keeps tail actions at their stored timesteps.
+    streaming_inference_mode: Literal["chunk", "action_head"] = "chunk"
 
     # Specifies how to load the policy. If not provided, the default policy for the environment will be used.
     policy: Checkpoint | Default = dataclasses.field(default_factory=Default)
@@ -200,6 +204,7 @@ def _serve_multi_process_role(args: Args, role: str, port: int) -> None:
         vlm_port=args.vlm_port,
         fm_host=args.fm_host,
         fm_port=fm_port,
+        streaming_inference_mode=args.streaming_inference_mode,
     )
     logging.info("Warming up %s server", role.upper())
     role_policy.warmup()

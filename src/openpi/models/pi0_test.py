@@ -165,6 +165,30 @@ def test_observation_delay_chunk_embedding_is_added_to_pi05_action_tokens():
     assert advanced.shape == action_window.shape
 
 
+def test_head_streaming_forward_accepts_one_action_token():
+    config = _pi0_config.Pi0Config(
+        pi05=True,
+        streaming=True,
+        streaming_chunk_size=2,
+        action_horizon=6,
+        paligemma_variant="dummy",
+        action_expert_variant="dummy",
+    )
+    model = config.create(jax.random.key(0))
+    observation = config.fake_obs()
+    prefix_cache = model.encode_prefix(observation)
+    head = jnp.zeros((1, 1, config.action_dim), dtype=jnp.float32)
+    result = model.advance_streaming_head_from_prefix(
+        observation.state,
+        prefix_cache,
+        head,
+        jnp.ones((1, 1), dtype=head.dtype),
+        jnp.zeros((1, 1), dtype=head.dtype),
+    )
+
+    assert result.shape == head.shape
+
+
 def test_pi0_config_snapshot_round_trip(tmp_path):
     config = _pi0_config.Pi0Config(
         pi05=True,

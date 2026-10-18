@@ -622,13 +622,15 @@ class Pi0(_model.BaseModel):
 
         return jnp.mean(jnp.square(v_t - u_t), axis=-1)
 
-    def _mask_action_chunks(self, attn_mask, action_start: int):
+    def _mask_action_chunks(self, attn_mask, action_start: int, action_count: int | None = None):
         if self.streaming_attention_mode != "mask":
             return attn_mask
         chunk_size = self.streaming_chunk_size if self.streaming else self.action_horizon
-        chunk_ids = jnp.arange(self.action_horizon) // chunk_size
+        if action_count is None:
+            action_count = self.action_horizon
+        chunk_ids = jnp.arange(action_count) // chunk_size
         same_chunk = chunk_ids[:, None] == chunk_ids[None, :]
-        action_end = action_start + self.action_horizon
+        action_end = action_start + action_count
         return attn_mask.at[:, action_start:action_end, action_start:action_end].set(
             attn_mask[:, action_start:action_end, action_start:action_end] & same_chunk[None]
         )
@@ -641,19 +643,22 @@ class Pi0(_model.BaseModel):
         key_length: int,
         action_query_start: int,
         action_key_start: int,
+        action_count: int | None = None,
     ) -> at.Float[at.Array, "b q s"] | None:
         if log_gates is None:
             return None
         chunk_size = self.streaming_chunk_size
-        chunk_ids = jnp.arange(self.action_horizon) // chunk_size
+        if action_count is None:
+            action_count = self.action_horizon
+        chunk_ids = jnp.arange(action_count) // chunk_size
         same_chunk = chunk_ids[:, None] == chunk_ids[None, :]
         query_gate = log_gates[:, chunk_ids]
         action_bias = jnp.where(same_chunk[None], 0.0, query_gate[:, :, None])
         bias = jnp.zeros((log_gates.shape[0], query_length, key_length), dtype=jnp.float32)
         return bias.at[
             :,
-            action_query_start : action_query_start + self.action_horizon,
-            action_key_start : action_key_start + self.action_horizon,
+            action_query_start : action_query_start + action_count,
+            action_key_start : action_key_start + action_count,
         ].set(action_bias)
 
     @override
@@ -876,6 +881,61 @@ class Pi0(_model.BaseModel):
         _, action_window = jax.lax.fori_loop(0, advance, step, (rng, action_window))
         return action_window
 
+    def advance_streaming_head_from_prefix(
+        self,
+        state: at.Float[at.Array, "b s"],
+        prefix_cache: dict,
+        head_action: _model.Actions,
+        current_timestep: at.Float[at.Array, "b 1"],
+        target_timestep: at.Float[at.Array, "b 1"],
+        tactile_condition: at.Float[at.Array, "b emb"] | None = None,
+        tactile_left_marker_history: at.Float[at.Array, "b th 2 63 2"] | None = None,
+        tactile_right_marker_history: at.Float[at.Array, "b th 2 63 2"] | None = None,
+        torque_history: at.Float[at.Array, "b th td"] | None = None,
+        state_history: at.Float[at.Array, "b th s"] | None = None,
+        observation_delay_chunks: at.Int[at.Array, "..."] | None = None,
+        gate_log_execution_id: at.Int[at.Array, ""] | None = None,
+        gate_log_cache_id: at.Int[at.Array, ""] | None = None,
+    ) -> _model.Actions:
+        """Advance only the streaming queue head to a target timestep.
+
+        The remaining queue entries are intentionally untouched. This is the
+        action-level streaming variant: one action is evaluated per call while
+        the tail keeps its own stored timestep until it reaches the head.
+        """
+        if not self.streaming:
+            raise ValueError("Streaming inference requires a model trained with streaming=True")
+        if head_action.shape[1] != 1:
+            raise ValueError("Head-only streaming expects exactly one action token")
+        if getattr(self, "use_tactile_adarms", False) and tactile_condition is None:
+            raise ValueError("use_tactile=True requires tactile_condition for streaming")
+
+        attention_mode = getattr(self, "streaming_attention_mode", None)
+        if attention_mode == "attention_gate":
+            attention_log_gates = self._conditioned_attention_log_gates_from_histories(
+                torque_history,
+                tactile_left_marker_history,
+                tactile_right_marker_history,
+                state_history,
+                gate_log_execution_id,
+                gate_log_cache_id,
+            )
+        elif attention_mode == "learnable_gate":
+            attention_log_gates = self._learnable_attention_log_gates(state.shape[0])
+        else:
+            attention_log_gates = None
+
+        velocity = self._velocity_from_prefix(
+            state,
+            prefix_cache,
+            head_action,
+            current_timestep,
+            tactile_condition,
+            attention_log_gates,
+            observation_delay_chunks,
+        )
+        return head_action + (target_timestep - current_timestep)[:, :, None] * velocity
+
     def _velocity_from_prefix(
         self,
         state: at.Float[at.Array, "b s"],
@@ -898,16 +958,20 @@ class Pi0(_model.BaseModel):
             suffix_observation, noisy_actions, timestep, tactile_condition
         )
         suffix_attn_mask = make_attn_mask(suffix_mask, suffix_ar_mask)
-        suffix_attn_mask = self._mask_action_chunks(suffix_attn_mask, suffix_tokens.shape[1] - self.action_horizon)
+        action_count = noisy_actions.shape[1]
+        action_query_start = suffix_tokens.shape[1] - action_count
+        suffix_attn_mask = self._mask_action_chunks(
+            suffix_attn_mask, action_query_start, action_count=action_count
+        )
         prefix_attn_mask = einops.repeat(prefix_pad_masks, "b p -> b s p", s=suffix_tokens.shape[1])
         full_attn_mask = jnp.concatenate([prefix_attn_mask, suffix_attn_mask], axis=-1)
-        action_query_start = suffix_tokens.shape[1] - self.action_horizon
         full_attn_bias = self._make_action_attention_bias(
             attention_log_gates,
             query_length=full_attn_mask.shape[1],
             key_length=full_attn_mask.shape[2],
             action_query_start=action_query_start,
             action_key_start=prefix_pad_masks.shape[1] + action_query_start,
+            action_count=action_count,
         )
         positions = jnp.sum(prefix_pad_masks, axis=-1)[:, None] + jnp.cumsum(suffix_mask, axis=-1) - 1
         (_, suffix_out), _ = self.PaliGemma.llm(
