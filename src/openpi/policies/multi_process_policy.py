@@ -217,9 +217,8 @@ class MultiProcessPolicy:
                 advanced = self._advance_streaming_head_from_prefix_jit(
                     observation.state,
                     prefix_cache,
-                    actions[:, :1],
-                    timestep[None, :1],
-                    jnp.zeros((actions.shape[0], 1), dtype=actions.dtype),
+                    actions,
+                    timestep[None, :],
                     tactile_condition=tactile_condition,
                     tactile_left_marker_history=observation.tactile_left_marker_history,
                     tactile_right_marker_history=observation.tactile_right_marker_history,
@@ -882,18 +881,14 @@ class MultiProcessPolicy:
         noise = jax.random.normal(noise_rng, actions.shape, dtype=actions.dtype)
         chunk_size = int(self.policy._model.streaming_chunk_size)  # noqa: SLF001
         if getattr(self, "streaming_inference_mode", "chunk") == "action_head":
-            # Keep each action at its own chunk timestep. The head-only path
-            # updates only the queue head; all tail entries keep this stored
-            # timestep until they reach the head.
+            # Keep each action at its own chunk timestep. The model still sees
+            # the complete horizon; the policy applies its velocity only to
+            # the queue head and leaves the tail untouched.
             noisy_actions = (
                 timestep[None, :, None] * noise
                 + (1.0 - timestep[None, :, None]) * actions
             )
-            action_window = jnp.concatenate([noisy_actions, noise[:, -chunk_size:]], axis=1)
-            timestep_window = jnp.concatenate(
-                [timestep, jnp.ones((chunk_size,), dtype=timestep.dtype)], axis=0
-            )
-            return _StreamingState(session_id, execution_id, action_window, timestep_window)
+            return _StreamingState(session_id, execution_id, noisy_actions, timestep)
 
         future_timestep = timestep[:-chunk_size]
         # ponytail: seed from a full sample plus the training marginal; retain an ODE trajectory only if cold starts need it.
@@ -934,17 +929,11 @@ class MultiProcessPolicy:
                 [timestep_window[1:], jnp.ones((1,), dtype=timestep_window.dtype)], axis=0
             )
 
-        head = action_window[:, :1]
-        current_timestep = jnp.broadcast_to(
-            timestep_window[:1][None, :], (head.shape[0], 1)
-        ).astype(head.dtype)
-        target_timestep = jnp.zeros_like(current_timestep)
-        updated_head = self._advance_streaming_head_from_prefix_jit(
+        velocity = self._advance_streaming_head_from_prefix_jit(
             model_observation.state,
             prefix_cache,
-            head,
-            current_timestep,
-            target_timestep,
+            action_window,
+            timestep_window[None, :].astype(action_window.dtype),
             tactile_condition=tactile_condition,
             tactile_left_marker_history=model_observation.tactile_left_marker_history,
             tactile_right_marker_history=model_observation.tactile_right_marker_history,
@@ -953,6 +942,9 @@ class MultiProcessPolicy:
             observation_delay_chunks=observation_delay_chunks,
             **gate_log_context,
         )
+        head = action_window[:, :1]
+        current_timestep = timestep_window[:1][None, :, None].astype(head.dtype)
+        updated_head = head - current_timestep * velocity[:, :1]
         stream_state.action_window = jnp.concatenate(
             [updated_head, action_window[:, 1:]], axis=1
         )

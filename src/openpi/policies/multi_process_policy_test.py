@@ -198,8 +198,8 @@ def test_action_head_seed_keeps_per_action_timesteps(monkeypatch):
 
     result = policy._seed_streaming_state("test", 0, jnp.zeros((1, 1)), {}, num_steps=10)
 
-    expected_actions = jnp.asarray([[[4.0], [14.0], [30.0], [30.0]]])
-    expected_timesteps = jnp.asarray([1 / 3, 2 / 3, 1.0, 1.0])
+    expected_actions = jnp.asarray([[[4.0], [14.0], [30.0]]])
+    expected_timesteps = jnp.asarray([1 / 3, 2 / 3, 1.0])
     assert jnp.allclose(result.action_window, expected_actions)
     assert jnp.allclose(result.timestep_window, expected_timesteps)
 
@@ -208,7 +208,7 @@ def test_action_head_step_updates_only_the_head(monkeypatch):
     policy = object.__new__(MultiProcessPolicy)
     policy._rng = jax.random.key(0)
     policy._advance_streaming_head_from_prefix_jit = (
-        lambda state, prefix, head, current, target, **kwargs: head + 10.0
+        lambda state, prefix, window, timestep, **kwargs: jnp.full_like(window, 10.0)
     )
     monkeypatch.setattr(
         jax.random,
@@ -238,7 +238,7 @@ def test_action_head_step_updates_only_the_head(monkeypatch):
         gate_log_context={},
         consume=False,
     )
-    assert jnp.allclose(stream_state.action_window, jnp.asarray([[[11.0], [2.0], [3.0]]]))
+    assert jnp.allclose(stream_state.action_window, jnp.asarray([[[-4.0], [2.0], [3.0]]]))
     assert jnp.allclose(stream_state.timestep_window, jnp.asarray([0.0, 0.5, 1.0]))
 
     policy._streaming_head_step(
@@ -250,5 +250,5 @@ def test_action_head_step_updates_only_the_head(monkeypatch):
         gate_log_context={},
         consume=True,
     )
-    assert jnp.allclose(stream_state.action_window, jnp.asarray([[[12.0], [3.0], [9.0]]]))
+    assert jnp.allclose(stream_state.action_window, jnp.asarray([[[-3.0], [3.0], [9.0]]]))
     assert jnp.allclose(stream_state.timestep_window, jnp.asarray([0.0, 1.0, 1.0]))

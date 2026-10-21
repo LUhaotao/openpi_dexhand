@@ -885,9 +885,8 @@ class Pi0(_model.BaseModel):
         self,
         state: at.Float[at.Array, "b s"],
         prefix_cache: dict,
-        head_action: _model.Actions,
-        current_timestep: at.Float[at.Array, "b 1"],
-        target_timestep: at.Float[at.Array, "b 1"],
+        action_window: _model.Actions,
+        timestep_window: at.Float[at.Array, "b ah"],
         tactile_condition: at.Float[at.Array, "b emb"] | None = None,
         tactile_left_marker_history: at.Float[at.Array, "b th 2 63 2"] | None = None,
         tactile_right_marker_history: at.Float[at.Array, "b th 2 63 2"] | None = None,
@@ -897,16 +896,22 @@ class Pi0(_model.BaseModel):
         gate_log_execution_id: at.Int[at.Array, ""] | None = None,
         gate_log_cache_id: at.Int[at.Array, ""] | None = None,
     ) -> _model.Actions:
-        """Advance only the streaming queue head to a target timestep.
+        """Run the normal full-window streaming forward for one queue update.
 
-        The remaining queue entries are intentionally untouched. This is the
-        action-level streaming variant: one action is evaluated per call while
-        the tail keeps its own stored timestep until it reaches the head.
+        The caller applies the returned velocity only to the queue head. The
+        complete action window remains an input so the model keeps the same
+        action-token context and attention pattern as streaming inference.
         """
         if not self.streaming:
             raise ValueError("Streaming inference requires a model trained with streaming=True")
-        if head_action.shape[1] != 1:
-            raise ValueError("Head-only streaming expects exactly one action token")
+        if action_window.shape[1] != self.action_horizon:
+            raise ValueError(
+                f"Action-head streaming expects a full action window of {self.action_horizon} tokens"
+            )
+        if timestep_window.shape[1] != self.action_horizon:
+            raise ValueError(
+                f"Action-head streaming expects {self.action_horizon} timestep tokens"
+            )
         if getattr(self, "use_tactile_adarms", False) and tactile_condition is None:
             raise ValueError("use_tactile=True requires tactile_condition for streaming")
 
@@ -925,16 +930,15 @@ class Pi0(_model.BaseModel):
         else:
             attention_log_gates = None
 
-        velocity = self._velocity_from_prefix(
+        return self._velocity_from_prefix(
             state,
             prefix_cache,
-            head_action,
-            current_timestep,
+            action_window,
+            timestep_window,
             tactile_condition,
             attention_log_gates,
             observation_delay_chunks,
         )
-        return head_action + (target_timestep - current_timestep)[:, :, None] * velocity
 
     def _velocity_from_prefix(
         self,

@@ -165,7 +165,7 @@ def test_observation_delay_chunk_embedding_is_added_to_pi05_action_tokens():
     assert advanced.shape == action_window.shape
 
 
-def test_head_streaming_forward_accepts_one_action_token():
+def test_head_streaming_forward_keeps_full_action_window_context():
     config = _pi0_config.Pi0Config(
         pi05=True,
         streaming=True,
@@ -177,16 +177,15 @@ def test_head_streaming_forward_accepts_one_action_token():
     model = config.create(jax.random.key(0))
     observation = config.fake_obs()
     prefix_cache = model.encode_prefix(observation)
-    head = jnp.zeros((1, 1, config.action_dim), dtype=jnp.float32)
+    action_window = jnp.zeros((1, config.action_horizon, config.action_dim), dtype=jnp.float32)
     result = model.advance_streaming_head_from_prefix(
         observation.state,
         prefix_cache,
-        head,
-        jnp.ones((1, 1), dtype=head.dtype),
-        jnp.zeros((1, 1), dtype=head.dtype),
+        action_window,
+        jnp.ones((1, config.action_horizon), dtype=action_window.dtype),
     )
 
-    assert result.shape == head.shape
+    assert result.shape == action_window.shape
 
 
 def test_pi0_config_snapshot_round_trip(tmp_path):
