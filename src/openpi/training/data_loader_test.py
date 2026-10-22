@@ -79,6 +79,32 @@ def test_delayed_observation_transform_keeps_continuous_state_current(monkeypatc
     assert result["observation_delay_chunks"] == 1
 
 
+def test_token_delay_transform_emits_token_delay(monkeypatch):
+    repack = _transforms.RepackTransform(
+        {"images": {"camera": "observation.images.camera"}, "state": "observation.state"}
+    )
+    transform = _data_loader._DelayedObservationTransform(
+        [repack], [], max_delay=2, delay_unit="tokens", discrete_state_input=False
+    )
+    monkeypatch.setattr(np.random, "randint", lambda *args: 2)
+
+    result = transform(
+        {
+            "observation.images.camera": np.asarray(
+                [
+                    np.full((1, 1, 1), 1, dtype=np.uint8),
+                    np.full((1, 1, 1), 2, dtype=np.uint8),
+                    np.full((1, 1, 1), 3, dtype=np.uint8),
+                ]
+            ),
+            "observation.state": np.asarray([7.0], dtype=np.float32),
+        }
+    )
+
+    assert result["observation_delay_tokens"] == 2
+    np.testing.assert_array_equal(result["images"]["camera"], 3)
+
+
 def test_state_gate_history_and_delayed_discrete_prompt_use_separate_states(monkeypatch):
     repack = _transforms.RepackTransform(
         {"images": {"camera": "observation.images.camera"}, "state": "observation.state", "actions": "action"}

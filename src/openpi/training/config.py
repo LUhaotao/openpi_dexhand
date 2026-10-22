@@ -94,7 +94,12 @@ class Bench2DexPi05Config(pi0_config.Pi0Config):
                 state=jax.ShapeDtypeStruct([batch_size, self.action_dim], jnp.float32),
                 observation_delay_chunks=(
                     jax.ShapeDtypeStruct([batch_size], jnp.int32)
-                    if self.use_observation_delay_embedding
+                    if self.use_observation_delay_embedding and self.observation_delay_max_chunks > 0
+                    else None
+                ),
+                observation_delay_tokens=(
+                    jax.ShapeDtypeStruct([batch_size], jnp.int32)
+                    if self.use_observation_delay_embedding and self.observation_delay_max_tokens > 0
                     else None
                 ),
                 state_history=(

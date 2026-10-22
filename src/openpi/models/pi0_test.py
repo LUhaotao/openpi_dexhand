@@ -113,6 +113,39 @@ def test_streaming_token_wise_weight_defaults_to_zero():
     assert _pi0_config.Pi0Config().use_tactile_adarms is False
 
 
+def test_observation_delay_units_are_mutually_exclusive():
+    with pytest.raises(ValueError, match="cannot both be non-zero"):
+        _pi0_config.Pi0Config(
+            pi05=True,
+            streaming=True,
+            observation_delay_max_chunks=1,
+            observation_delay_max_tokens=1,
+        )
+
+
+def test_observation_delay_token_embedding_is_used():
+    config = _pi0_config.Pi0Config(
+        pi05=True,
+        streaming=True,
+        action_horizon=6,
+        streaming_chunk_size=2,
+        observation_delay_max_tokens=3,
+        use_observation_delay_embedding=True,
+        paligemma_variant="dummy",
+        action_expert_variant="dummy",
+    )
+    model = config.create(jax.random.key(0))
+    observation = config.fake_obs().replace(observation_delay_tokens=jnp.asarray([2], dtype=jnp.int32))
+    actions = jnp.zeros((1, config.action_horizon, config.action_dim), dtype=jnp.float32)
+    timestep = jnp.ones((1, config.action_horizon), dtype=jnp.float32)
+    model.observation_delay_embedding.value = model.observation_delay_embedding.value.at[2].set(0.25)
+
+    current_tokens, *_ = model.embed_suffix(config.fake_obs(), actions, timestep)
+    delayed_tokens, *_ = model.embed_suffix(observation, actions, timestep)
+
+    assert jnp.allclose(delayed_tokens - current_tokens, 0.25)
+
+
 def test_tactile_adarms_requires_tactile():
     with pytest.raises(ValueError, match="requires use_tactile=True"):
         _pi0_config.Pi0Config(pi05=True, use_tactile_adarms=True)

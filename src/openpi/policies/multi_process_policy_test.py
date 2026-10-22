@@ -119,6 +119,19 @@ def test_cache_delay_advances_while_same_prefix_cache_is_active():
     assert int(after_cache_switch[0]) == 4
 
 
+def test_token_observation_delay_uses_action_index():
+    policy = object.__new__(MultiProcessPolicy)
+    policy.policy = SimpleNamespace(
+        _model=SimpleNamespace(observation_delay_max_chunks=0, observation_delay_max_tokens=8, streaming_chunk_size=5)
+    )
+
+    chunks, tokens = policy._cache_delay_condition(7, 3)
+
+    assert chunks is None
+    assert int(tokens[0]) == 4
+    assert policy._observation_delay_index(7) == 7
+
+
 def test_stream_infer_without_delay_embedding_snapshots_before_request_validation(monkeypatch):
     policy = object.__new__(MultiProcessPolicy)
     policy.policy = SimpleNamespace(

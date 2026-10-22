@@ -95,6 +95,8 @@ class Observation(Generic[ArrayT]):
     state: at.Float[ArrayT, "*b s"]
     # Number of streaming chunks by which the observation is delayed.
     observation_delay_chunks: at.Int[ArrayT, "*b"] | None = None
+    # Number of action tokens by which the observation is delayed.
+    observation_delay_tokens: at.Int[ArrayT, "*b"] | None = None
     # Current-to-past window, stored oldest first, for state attention gating.
     state_history: at.Float[ArrayT, "*b th s"] | None = None
     # Optional low-dimensional torque/effort input and history.
@@ -137,6 +139,7 @@ class Observation(Generic[ArrayT]):
             image_masks=data["image_mask"],
             state=data["state"],
             observation_delay_chunks=data.get("observation_delay_chunks"),
+            observation_delay_tokens=data.get("observation_delay_tokens"),
             state_history=data.get("state_history"),
             torque=data.get("torque"),
             torque_history=data.get("torque_history"),
@@ -229,6 +232,7 @@ def preprocess_observation(
         image_masks=out_masks,
         state=observation.state,
         observation_delay_chunks=observation.observation_delay_chunks,
+        observation_delay_tokens=observation.observation_delay_tokens,
         state_history=observation.state_history,
         torque=observation.torque,
         torque_history=observation.torque_history,

@@ -177,6 +177,10 @@ class Pi0(_model.BaseModel):
         self.observation_delay_max_chunks = (
             config.observation_delay_max_chunks if config.use_observation_delay_embedding else 0
         )
+        self.observation_delay_max_tokens = (
+            config.observation_delay_max_tokens if config.use_observation_delay_embedding else 0
+        )
+        self.observation_delay_max = max(self.observation_delay_max_chunks, self.observation_delay_max_tokens)
         self._save_gate_logs = False
         self._gate_log_exp_name: str | None = None
         self.use_tactile = config.use_tactile
@@ -216,9 +220,9 @@ class Pi0(_model.BaseModel):
                 self.state_proj = nnx.Linear(config.action_dim, action_expert_config.width, rngs=rngs)
             self.time_mlp_in = nnx.Linear(action_expert_config.width, action_expert_config.width, rngs=rngs)
             self.time_mlp_out = nnx.Linear(action_expert_config.width, action_expert_config.width, rngs=rngs)
-            if self.observation_delay_max_chunks > 0:
+            if self.observation_delay_max > 0:
                 self.observation_delay_embedding = nnx.Param(
-                    jnp.zeros((self.observation_delay_max_chunks + 1, action_expert_config.width), dtype=jnp.float32)
+                    jnp.zeros((self.observation_delay_max + 1, action_expert_config.width), dtype=jnp.float32)
                 )
             if (
                 config.streaming_attention_mode == "attention_gate"
@@ -479,12 +483,15 @@ class Pi0(_model.BaseModel):
             ar_mask += [True]
 
         action_tokens = self.action_in_proj(noisy_actions)
-        if self.observation_delay_max_chunks > 0:
-            delay_chunks = obs.observation_delay_chunks
-            if delay_chunks is None:
-                delay_chunks = jnp.zeros((obs.state.shape[0],), dtype=jnp.int32)
+        if self.observation_delay_max > 0:
+            if self.observation_delay_max_tokens > 0:
+                delay = obs.observation_delay_tokens
+            else:
+                delay = obs.observation_delay_chunks
+            if delay is None:
+                delay = jnp.zeros((obs.state.shape[0],), dtype=jnp.int32)
             delay_indices = jnp.clip(
-                jnp.asarray(delay_chunks, dtype=jnp.int32), 0, self.observation_delay_max_chunks
+                jnp.asarray(delay, dtype=jnp.int32), 0, self.observation_delay_max
             )
             delay_embedding = self.observation_delay_embedding.value[delay_indices]
             action_tokens = action_tokens + delay_embedding[:, None, :].astype(action_tokens.dtype)
@@ -764,6 +771,7 @@ class Pi0(_model.BaseModel):
         torque_history: at.Float[at.Array, "b th td"] | None = None,
         state_history: at.Float[at.Array, "b th s"] | None = None,
         observation_delay_chunks: at.Int[at.Array, "..."] | None = None,
+        observation_delay_tokens: at.Int[at.Array, "..."] | None = None,
         gate_log_execution_id: at.Int[at.Array, ""] | None = None,
         gate_log_cache_id: at.Int[at.Array, ""] | None = None,
     ) -> _model.Actions:
@@ -799,6 +807,7 @@ class Pi0(_model.BaseModel):
                 tactile_condition,
                 attention_log_gates,
                 observation_delay_chunks,
+                observation_delay_tokens,
             )
             return x_t + dt * v_t, time + dt
 
@@ -825,6 +834,7 @@ class Pi0(_model.BaseModel):
         torque_history: at.Float[at.Array, "b th td"] | None = None,
         state_history: at.Float[at.Array, "b th s"] | None = None,
         observation_delay_chunks: at.Int[at.Array, "..."] | None = None,
+        observation_delay_tokens: at.Int[at.Array, "..."] | None = None,
         gate_log_execution_id: at.Int[at.Array, ""] | None = None,
         gate_log_cache_id: at.Int[at.Array, ""] | None = None,
     ) -> _model.Actions:
@@ -859,6 +869,7 @@ class Pi0(_model.BaseModel):
                 tactile_condition is None
                 and attention_log_gates is None
                 and observation_delay_chunks is None
+                and observation_delay_tokens is None
             ):
                 velocity = self._velocity_from_prefix(state, prefix_cache, actions, timestep[None, :])
             else:
@@ -870,6 +881,7 @@ class Pi0(_model.BaseModel):
                     tactile_condition,
                     attention_log_gates,
                     observation_delay_chunks,
+                    observation_delay_tokens,
                 )
             fresh_noise = jax.random.normal(
                 noise_rng,
@@ -893,6 +905,7 @@ class Pi0(_model.BaseModel):
         torque_history: at.Float[at.Array, "b th td"] | None = None,
         state_history: at.Float[at.Array, "b th s"] | None = None,
         observation_delay_chunks: at.Int[at.Array, "..."] | None = None,
+        observation_delay_tokens: at.Int[at.Array, "..."] | None = None,
         gate_log_execution_id: at.Int[at.Array, ""] | None = None,
         gate_log_cache_id: at.Int[at.Array, ""] | None = None,
     ) -> _model.Actions:
@@ -938,6 +951,7 @@ class Pi0(_model.BaseModel):
             tactile_condition,
             attention_log_gates,
             observation_delay_chunks,
+            observation_delay_tokens,
         )
 
     def _velocity_from_prefix(
@@ -949,6 +963,7 @@ class Pi0(_model.BaseModel):
         tactile_condition: at.Float[at.Array, "b emb"] | None = None,
         attention_log_gates: at.Float[at.Array, "b k"] | None = None,
         observation_delay_chunks: at.Int[at.Array, "..."] | None = None,
+        observation_delay_tokens: at.Int[at.Array, "..."] | None = None,
     ) -> _model.Actions:
         """Predict flow velocity for suffix tokens against an encoded prefix."""
         kv_cache = jax.tree.map(
@@ -956,7 +971,11 @@ class Pi0(_model.BaseModel):
         )
         prefix_pad_masks = jnp.asarray(prefix_cache["prefix_pad_mask"], dtype=jnp.bool_)
         suffix_observation = _model.Observation(
-            images={}, image_masks={}, state=state, observation_delay_chunks=observation_delay_chunks
+            images={},
+            image_masks={},
+            state=state,
+            observation_delay_chunks=observation_delay_chunks,
+            observation_delay_tokens=observation_delay_tokens,
         )
         suffix_tokens, suffix_mask, suffix_ar_mask, adarms_cond = self.embed_suffix(
             suffix_observation, noisy_actions, timestep, tactile_condition

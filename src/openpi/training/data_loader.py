@@ -63,11 +63,11 @@ class TransformedDataset(Dataset[T_co]):
 
 
 class _DelayedObservationTransform:
-    """Apply a random chunk-aligned observation delay during JAX training.
+    """Apply a random chunk- or token-aligned observation delay during JAX training.
 
     The raw LeRobot dataset is configured to return the current observation and
-    the observations at each possible delayed chunk. This transform selects one
-    delay per sample, shifts images to ``t - d * chunk_size``, and optionally
+    the observations at each possible delayed unit. This transform selects one
+    delay per sample, shifts images to ``t - d * delay_step``, and optionally
     shifts the state when it is encoded into the discrete prompt.
 
     Actions are always processed from the current state. This keeps delta-action
@@ -80,20 +80,26 @@ class _DelayedObservationTransform:
         repack_transforms: Sequence[_transforms.DataTransformFn],
         data_transforms: Sequence[_transforms.DataTransformFn],
         *,
-        max_delay_chunks: int,
+        max_delay: int | None = None,
+        delay_unit: str = "chunks",
+        max_delay_chunks: int | None = None,
         discrete_state_input: bool,
         chunk_size: int = 1,
         state_history_length: int = 0,
     ):
         self._repack = _transforms.compose(repack_transforms)
         self._data = _transforms.compose(data_transforms)
-        self._max_delay_chunks = max_delay_chunks
+        if max_delay is None:
+            max_delay = 0 if max_delay_chunks is None else max_delay_chunks
+        self._max_delay = int(max_delay)
+        self._delay_unit = delay_unit
         self._discrete_state_input = discrete_state_input
         self._chunk_size = chunk_size
         self._state_history_length = state_history_length
+        self._delay_step = chunk_size if delay_unit == "chunks" else 1
         offsets = {0}
         if discrete_state_input:
-            offsets.update(-delay * chunk_size for delay in range(max_delay_chunks + 1))
+            offsets.update(-delay * self._delay_step for delay in range(max_delay + 1))
         if state_history_length:
             offsets.update(range(-(state_history_length - 1), 1))
         self._state_offsets = [0, *sorted(offsets - {0}, reverse=True)]
@@ -104,25 +110,25 @@ class _DelayedObservationTransform:
         if not isinstance(images, Mapping) or not images:
             raise ValueError("Observation delay requires repack transforms to provide non-empty 'images'.")
 
-        delay_chunks = int(np.random.randint(0, self._max_delay_chunks + 1))
-        expected_history_length = self._max_delay_chunks + 1
+        delay = int(np.random.randint(0, self._max_delay + 1))
+        expected_history_length = self._max_delay + 1
         delayed_images = {}
         for name, image in images.items():
             image_array = np.asarray(image)
-            if self._max_delay_chunks:
+            if self._max_delay:
                 if image_array.ndim < 4 or image_array.shape[0] != expected_history_length:
                     raise ValueError(
                         f"Expected image history of length {expected_history_length} for {name}, "
                         f"got shape {image_array.shape}."
                     )
-                delayed_images[name] = image_array[delay_chunks]
+                delayed_images[name] = image_array[delay]
             else:
                 delayed_images[name] = image_array
 
         delayed_data = {**data, "images": delayed_images}
         if not self._discrete_state_input and not self._state_history_length:
             processed = self._data(delayed_data)
-            processed["observation_delay_chunks"] = np.int32(delay_chunks)
+            processed[f"observation_delay_{self._delay_unit}"] = np.int32(delay)
             return processed
 
         state = np.asarray(data.get("state"))
@@ -146,15 +152,15 @@ class _DelayedObservationTransform:
                 history_data.pop("actions", None)
                 history.append(np.asarray(self._data(history_data)["state"], dtype=np.float32))
             current_processed["state_history"] = np.stack(history, axis=0)
-        if self._discrete_state_input and self._max_delay_chunks:
-            delayed_offset = -delay_chunks * self._chunk_size
+        if self._discrete_state_input and self._max_delay:
+            delayed_offset = -delay * self._delay_step
             delayed_state_data = {**delayed_data, "state": state[self._state_offsets.index(delayed_offset)]}
             delayed_state_data.pop("actions", None)
             delayed_processed = self._data(delayed_state_data)
             if "state" not in delayed_processed:
                 raise ValueError("Data transforms must provide 'state' for discrete-state observation delay.")
             current_processed["state"] = delayed_processed["state"]
-        current_processed["observation_delay_chunks"] = np.int32(delay_chunks)
+        current_processed[f"observation_delay_{self._delay_unit}"] = np.int32(delay)
         return current_processed
 
 
@@ -316,21 +322,30 @@ def _add_state_history_timestamps(delta_timestamps, data_config, dataset_meta, m
     offsets = {0}
     offsets.update(range(-(history_length - 1), 1))
     if model_config.discrete_state_input:
-        offsets.update(-delay * model_config.streaming_chunk_size
-                       for delay in range(model_config.observation_delay_max_chunks + 1))
+        max_delay, delay_step, _, _ = _observation_delay_settings(model_config)
+        offsets.update(-delay * delay_step for delay in range(max_delay + 1))
     ordered = [0, *sorted(offsets - {0}, reverse=True)]
     delta_timestamps[sources[0]] = [offset / dataset_meta.fps for offset in ordered]
 
 
-def _observation_delay_settings(model_config: _model.BaseModelConfig) -> tuple[int, int, bool]:
+def _observation_delay_settings(model_config: _model.BaseModelConfig) -> tuple[int, int, str, bool]:
     max_delay_chunks = int(getattr(model_config, "observation_delay_max_chunks", 0))
+    max_delay_tokens = int(getattr(model_config, "observation_delay_max_tokens", 0))
     chunk_size = int(getattr(model_config, "streaming_chunk_size", 1))
     discrete_state_input = bool(getattr(model_config, "discrete_state_input", False))
     if max_delay_chunks < 0:
         raise ValueError("observation_delay_max_chunks must be non-negative")
-    if chunk_size < 1:
-        raise ValueError("streaming_chunk_size must be positive when observation delay is enabled")
-    return max_delay_chunks, chunk_size, discrete_state_input
+    if max_delay_tokens < 0:
+        raise ValueError("observation_delay_max_tokens must be non-negative")
+    if max_delay_chunks and max_delay_tokens:
+        raise ValueError(
+            "observation_delay_max_chunks and observation_delay_max_tokens cannot both be non-zero"
+        )
+    if max_delay_chunks and chunk_size < 1:
+        raise ValueError("streaming_chunk_size must be positive for chunk observation delay")
+    if max_delay_chunks:
+        return max_delay_chunks, chunk_size, "chunks", discrete_state_input
+    return max_delay_tokens, 1, "tokens", discrete_state_input
 
 
 def _add_observation_delay_timestamps(
@@ -340,17 +355,17 @@ def _add_observation_delay_timestamps(
     model_config: _model.BaseModelConfig,
 ) -> None:
     """Add current-to-past observation timestamps for the JAX delay transform."""
-    max_delay_chunks, chunk_size, discrete_state_input = _observation_delay_settings(model_config)
-    if max_delay_chunks == 0:
+    max_delay, delay_step, delay_unit, discrete_state_input = _observation_delay_settings(model_config)
+    if max_delay == 0:
         return
 
-    delay_timestamps = [-(delay * chunk_size) / dataset_meta.fps for delay in range(max_delay_chunks + 1)]
+    delay_timestamps = [-(delay * delay_step) / dataset_meta.fps for delay in range(max_delay + 1)]
     image_sources = tuple(
         dict.fromkeys(key for key in _repack_source_keys(data_config, "images") if key in dataset_meta.camera_keys)
     )
     if not image_sources:
         raise ValueError(
-            "observation_delay_max_chunks requires a RepackTransform with dataset camera keys under 'images'."
+            f"observation delay in {delay_unit} requires a RepackTransform with dataset camera keys under 'images'."
         )
     for key in image_sources:
         delta_timestamps[key] = delay_timestamps
@@ -407,7 +422,7 @@ def transform_dataset(
     if apply_observation_delay:
         if model_config is None:
             raise ValueError("model_config is required when observation delay is enabled")
-        max_delay_chunks, chunk_size, discrete_state_input = _observation_delay_settings(model_config)
+        max_delay, delay_step, delay_unit, discrete_state_input = _observation_delay_settings(model_config)
         state_history_length = (
             int(model_config.gate_history_length)
             if getattr(model_config, "streaming_attention_mode", None) == "attention_gate"
@@ -419,13 +434,14 @@ def transform_dataset(
                 _DelayedObservationTransform(
                     data_config.repack_transforms.inputs,
                     data_config.data_transforms.inputs,
-                    max_delay_chunks=max_delay_chunks,
+                    max_delay=max_delay,
+                    delay_unit=delay_unit,
                     discrete_state_input=discrete_state_input,
-                    chunk_size=chunk_size,
+                    chunk_size=delay_step,
                     state_history_length=state_history_length,
                 )
             ]
-            if max_delay_chunks > 0 or state_history_length > 0
+            if max_delay > 0 or state_history_length > 0
             else [*data_config.repack_transforms.inputs, *data_config.data_transforms.inputs]
         )
     else:
