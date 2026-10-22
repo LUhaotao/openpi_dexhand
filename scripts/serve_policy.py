@@ -209,7 +209,23 @@ def _serve_multi_process_role(args: Args, role: str, port: int) -> None:
     logging.info("Warming up %s server", role.upper())
     role_policy.warmup()
     logging.info("%s server warmup complete", role.upper())
-    metadata = {**policy.metadata, "multi_process_role": role}
+    model = getattr(policy, "_model", None)
+    runtime_model = {
+        name: getattr(model, name)
+        for name in (
+            "streaming",
+            "action_horizon",
+            "streaming_chunk_size",
+            "gate_history_length",
+            "gate_sources",
+        )
+        if model is not None and hasattr(model, name)
+    }
+    metadata = {
+        **policy.metadata,
+        "multi_process_role": role,
+        "runtime_model": runtime_model,
+    }
     server = websocket_policy_server.WebsocketPolicyServer(
         policy=role_policy,
         host="0.0.0.0",

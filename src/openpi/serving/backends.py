@@ -21,6 +21,20 @@ from openpi.serving.runtime import CacheInfo
 logger = logging.getLogger(__name__)
 
 
+def _runtime_model_metadata(model: Any) -> dict[str, Any]:
+    return {
+        name: getattr(model, name)
+        for name in (
+            "streaming",
+            "action_horizon",
+            "streaming_chunk_size",
+            "gate_history_length",
+            "gate_sources",
+        )
+        if hasattr(model, name)
+    }
+
+
 class LocalBackend:
     """Run VLM and FM computations in one process using direct JAX objects."""
 
@@ -34,7 +48,12 @@ class LocalBackend:
 
     @property
     def metadata(self) -> dict[str, Any]:
-        return {**self._policy.metadata, "backend": "local"}
+        model = self._policy._model  # noqa: SLF001
+        return {
+            **self._policy.metadata,
+            "backend": "local",
+            "runtime_model": _runtime_model_metadata(model),
+        }
 
     def warmup(self) -> None:
         with self._lock:
@@ -129,7 +148,10 @@ class ProcessBackend:
     ) -> CacheInfo:
         del session_id  # The VLM cache is selected by the Runtime session state.
         request_id = f"runtime-{uuid.uuid4().hex}"
-        marker = self._fm_infer({"op": "observation_started", "request_id": request_id})
+        marker_request = {"op": "observation_started", "request_id": request_id}
+        if executed_action_id is not None:
+            marker_request["executed_action_id"] = int(executed_action_id)
+        marker = self._fm_infer(marker_request)
         descriptor = self._vlm_infer({
             "op": "encode_prefix_to_shared_memory",
             "observation": observation,

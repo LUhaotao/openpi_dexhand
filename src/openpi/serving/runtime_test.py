@@ -1,6 +1,8 @@
 from types import SimpleNamespace
 from typing import ClassVar
 
+import numpy as np
+
 from openpi.policies import multi_process_policy
 from openpi.serving import backends
 from openpi.serving import runtime
@@ -72,6 +74,88 @@ def test_runtime_stream_reuses_session_prefix_when_requested():
 
     assert len([call for call in backend.calls if call[0] == "update_prefix"]) == 1
     assert len([call for call in backend.calls if call[0] == "infer"]) == 2
+
+
+def test_observation_action_runtime_queues_chunks_and_refreshes_prefix_on_refill():
+    class ChunkBackend(_FakeBackend):
+        def update_prefix(self, observation, *, session_id, executed_action_id=None):
+            self.calls.append(("update_prefix", {
+                "observation": observation,
+                "session_id": session_id,
+                "executed_action_id": executed_action_id,
+            }))
+            return CacheInfo(1, f"cache:{executed_action_id}")
+
+        def infer(self, request, *, session_id, cache_version):
+            self.calls.append(("infer", {
+                "request": request,
+                "session_id": session_id,
+                "cache_version": cache_version,
+            }))
+            start = request["executed_action_id"]
+            return {"actions": [[start], [start + 1], [start + 2]]}
+
+    backend = ChunkBackend()
+    coordinator = runtime.RuntimeCoordinator(
+        backend, streaming_horizon=4, streaming_watermark=2
+    )
+    outputs = [
+        coordinator.infer_with_session({"state": [step]}, session_id="robot")
+        for step in range(4)
+    ]
+
+    assert [int(output["actions"][0]) for output in outputs] == [0, 1, 2, 3]
+    assert [call[0] for call in backend.calls] == ["update_prefix", "infer", "update_prefix", "infer"]
+    infer_requests = [call[1]["request"] for call in backend.calls if call[0] == "infer"]
+    assert [request["executed_action_id"] for request in infer_requests] == [0, 3]
+    assert all(request["op"] == "stream_infer" for request in infer_requests)
+    assert all("session_id" not in request for request in infer_requests)
+
+
+def test_observation_action_runtime_reset_clears_queued_actions_and_counter():
+    class ChunkBackend(_FakeBackend):
+        def infer(self, request, *, session_id, cache_version):
+            self.calls.append(("infer", {"request": request}))
+            return {"actions": [[10], [11], [12]]}
+
+    backend = ChunkBackend()
+    coordinator = runtime.RuntimeCoordinator(backend)
+    coordinator.infer_with_session({"state": [0]}, session_id="robot")
+    reset = coordinator.infer_with_session(
+        {"op": "reset_stream", "clear_prefix_cache": True}, session_id="robot"
+    )
+    result = coordinator.infer_with_session({"state": [1]}, session_id="robot")
+
+    assert reset["prefix_cache_cleared"] is True
+    assert int(result["actions"][0]) == 10
+    requests = [call[1]["request"] for call in backend.calls if call[0] == "infer"]
+    assert [request["executed_action_id"] for request in requests] == [0, 0]
+
+
+def test_observation_history_includes_frames_received_while_actions_are_queued():
+    class HistoryBackend(_FakeBackend):
+        def infer(self, request, *, session_id, cache_version):
+            self.calls.append(("infer", {"request": request}))
+            return {"actions": [[1], [2], [3]]}
+
+    backend = HistoryBackend()
+    coordinator = runtime.RuntimeCoordinator(backend, history_length=3)
+    for step in range(4):
+        coordinator.infer_with_session(
+            {
+                "state": [step],
+                "left_marker": np.full((2, 1, 2), step, dtype=np.float32),
+                "right_marker": np.full((2, 1, 2), step + 10, dtype=np.float32),
+            },
+            session_id="robot",
+        )
+
+    requests = [call[1]["request"] for call in backend.calls if call[0] == "infer"]
+    request = requests[-1]
+    np.testing.assert_array_equal(request["observation"]["state"][:, 0], [1, 2, 3])
+    np.testing.assert_array_equal(
+        request["observation"]["left_marker"][:, 0, 0, 0], [1, 2, 3]
+    )
 
 
 def test_runtime_tracks_cache_independently_per_session():

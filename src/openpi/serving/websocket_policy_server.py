@@ -70,12 +70,13 @@ class WebsocketPolicyServer:
                         action = await asyncio.to_thread(self._policy.infer, obs)
                     infer_time = time.monotonic() - infer_time
 
-                    action["server_timing"] = {
-                        "infer_ms": infer_time * 1000,
-                    }
-                    if prev_total_time is not None:
-                        # We can only record the last total time since we also want to include the send time.
-                        action["server_timing"]["prev_total_ms"] = prev_total_time * 1000
+                    if not getattr(self._policy, "observation_action_protocol", False):
+                        action["server_timing"] = {
+                            "infer_ms": infer_time * 1000,
+                        }
+                        if prev_total_time is not None:
+                            # We can only record the last total time since we also want to include the send time.
+                            action["server_timing"]["prev_total_ms"] = prev_total_time * 1000
 
                     await websocket.send(packer.pack(action))
                     prev_total_time = time.monotonic() - start_time

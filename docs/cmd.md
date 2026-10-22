@@ -142,12 +142,14 @@ XLA_PYTHON_CLIENT_PREALLOCATE=false .venv/bin/python scripts/serve_runtime.py \
   --port 8000 \
   --vlm-cuda-device 0 \
   --fm-cuda-device 1 \
+  --streaming-horizon 50 \
+  --streaming-watermark 40 \
   policy:checkpoint \
   --policy.config pi05_franka_xhand_flower_streaming \
   --policy.dir /path/to/streaming_checkpoint
 ```
 
-客户端只连接 `127.0.0.1:8000`。普通 `client.infer(observation)` 会由 Runtime 自动完成 VLM prefix、KV cache 激活和 FM 推理；streaming 请求可以通过 `update_prefix` 控制是否更新视觉上下文。Runtime 的两个 worker 使用随机分配的本机私有端口，原有 VLM/FM 公网端口协议仍然保留。
+UniVTAC 使用 `policy/openpi/deploy_runtime.yml`，只连接 Runtime 的 `8000` 端口。每个控制周期同步发送一帧 observation 并等待一个 action；推理消息里只有 observation/action。Runtime 在服务端内部维护 execution id、FM chunk action queue 和 VLM refresh waterline，client 无需发送 cache/session/execution 调度字段。`reset_stream` 仅在 episode 开始时作为生命周期控制消息发送。Runtime 的两个 worker 使用随机分配的本机私有端口，原有 VLM/FM 公网端口协议仍然保留。
 
 单进程也可使用相同 Runtime API，将 backend 切到 `local`。此模式只加载一个本地 JAX policy，KV Cache 直接作为 JAX pytree 传递，不使用 worker WebSocket 或 shared memory：
 

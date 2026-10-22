@@ -50,6 +50,13 @@ class Args:
     mode: Literal["process", "local"] = "process"
     save_gate_logs: bool = False
     worker_start_timeout: float = 300.0
+    # Runtime-owned VLM refresh schedule.  The public client only sends
+    # observations; action-window refill and cache refresh are server policy.
+    streaming_horizon: int = 50
+    streaming_watermark: int = 40
+    num_steps: int = 10
+    # Optional override; defaults to the selected model's gate history length.
+    history_length: int | None = None
     # These are physical CUDA device indices on the host.  The worker process sees
     # its selected device as local device 0 after CUDA_VISIBLE_DEVICES is applied.
     vlm_cuda_device: int = 0
@@ -144,7 +151,13 @@ def _serve_local(args: Args) -> None:
     )
     policy = _serve_policy.create_policy(policy_args)
     backend = LocalBackend(policy)
-    coordinator = _runtime.RuntimeCoordinator(backend)
+    coordinator = _runtime.RuntimeCoordinator(
+        backend,
+        streaming_horizon=args.streaming_horizon,
+        streaming_watermark=args.streaming_watermark,
+        num_steps=args.num_steps,
+        history_length=args.history_length,
+    )
     coordinator.warmup()
     metadata = {**coordinator.metadata, "runtime": "local"}
     server = websocket_policy_server.WebsocketPolicyServer(
@@ -213,7 +226,13 @@ def main(args: Args) -> None:
                 "fm_cuda_device": args.fm_cuda_device,
             },
         )
-        coordinator = _runtime.RuntimeCoordinator(backend)
+        coordinator = _runtime.RuntimeCoordinator(
+            backend,
+            streaming_horizon=args.streaming_horizon,
+            streaming_watermark=args.streaming_watermark,
+            num_steps=args.num_steps,
+            history_length=args.history_length,
+        )
         coordinator.warmup()
         metadata = coordinator.metadata
         logger.info(
