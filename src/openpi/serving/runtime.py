@@ -86,7 +86,6 @@ class RuntimeCoordinator:
         metadata: dict[str, Any] | None = None,
         streaming_horizon: int = 50,
         streaming_watermark: int = 40,
-        refresh_prefix_every_action: bool = False,
         num_steps: int = 10,
         history_length: int | None = None,
     ):
@@ -115,7 +114,6 @@ class RuntimeCoordinator:
         self._streaming_horizon = int(streaming_horizon)
         self._streaming_watermark = int(streaming_watermark)
         self._refresh_after = self._streaming_horizon - self._streaming_watermark
-        self._refresh_prefix_every_action = bool(refresh_prefix_every_action)
         self._num_steps = int(num_steps)
         backend_metadata = backend.metadata
         model_metadata = backend_metadata.get("runtime_model") or backend_metadata.get(
@@ -228,8 +226,7 @@ class RuntimeCoordinator:
             if not session.action_queue:
                 execution_id = session.execution_id
                 needs_refresh = (
-                    self._refresh_prefix_every_action
-                    or session.cache_version is None
+                    session.cache_version is None
                     or session.last_prefix_execution_id is None
                     or execution_id - session.last_prefix_execution_id >= self._refresh_after
                 )

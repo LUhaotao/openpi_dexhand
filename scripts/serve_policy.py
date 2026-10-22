@@ -70,9 +70,9 @@ class Args:
     # Serve one role only. Use this to pin VLM and FM to separate GPUs.
     multi_process_role: Literal["vlm", "fm"] | None = None
     # Streaming inference implementation used by the FM worker. ``chunk``
-    # preserves the existing behavior; ``action_head`` updates one queue head
-    # per request and keeps tail actions at their stored timesteps.
-    streaming_inference_mode: Literal["chunk", "action_head"] = "chunk"
+    # returns a full action chunk; ``action_head`` updates only the queue head;
+    # ``chunk_heads`` updates each local chunk head and returns one action.
+    streaming_inference_mode: Literal["chunk", "action_head", "chunk_heads"] = "chunk_heads"
 
     # Specifies how to load the policy. If not provided, the default policy for the environment will be used.
     policy: Checkpoint | Default = dataclasses.field(default_factory=Default)

@@ -121,8 +121,16 @@ def _wait_for_worker(process: multiprocessing.Process, port: int, timeout: float
         if not process.is_alive():
             raise RuntimeError(f"Runtime worker exited before opening port {port}")
         try:
-            with socket.create_connection(("127.0.0.1", port), timeout=0.5):
+            with socket.create_connection(("127.0.0.1", port), timeout=0.5) as sock:
+                sock.sendall(
+                    b"GET /healthz HTTP/1.1\r\n"
+                    b"Host: 127.0.0.1\r\n"
+                    b"Connection: close\r\n\r\n"
+                )
+                status_line = sock.recv(256).split(b"\r\n", 1)[0]
+            if status_line.startswith(b"HTTP/1.1 200 ") or status_line.startswith(b"HTTP/1.0 200 "):
                 return
+            time.sleep(0.2)
         except OSError:
             time.sleep(0.2)
     raise TimeoutError(f"Timed out waiting for Runtime worker on port {port}")
@@ -157,7 +165,6 @@ def _serve_local(args: Args) -> None:
         backend,
         streaming_horizon=args.streaming_horizon,
         streaming_watermark=args.streaming_watermark,
-        refresh_prefix_every_action=args.streaming_inference_mode != "chunk",
         num_steps=args.num_steps,
         history_length=args.history_length,
     )
@@ -233,7 +240,6 @@ def main(args: Args) -> None:
             backend,
             streaming_horizon=args.streaming_horizon,
             streaming_watermark=args.streaming_watermark,
-            refresh_prefix_every_action=args.streaming_inference_mode != "chunk",
             num_steps=args.num_steps,
             history_length=args.history_length,
         )

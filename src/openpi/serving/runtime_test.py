@@ -112,17 +112,6 @@ def test_observation_action_runtime_queues_chunks_and_refreshes_prefix_on_refill
     assert all("session_id" not in request for request in infer_requests)
 
 
-def test_runtime_can_refresh_prefix_for_every_action_head_step():
-    backend = _FakeBackend()
-    coordinator = runtime.RuntimeCoordinator(backend, refresh_prefix_every_action=True)
-
-    for step in range(3):
-        coordinator.infer_with_session({"state": [step]}, session_id="robot")
-
-    refreshes = [call[1]["executed_action_id"] for call in backend.calls if call[0] == "update_prefix"]
-    assert refreshes == [0, 1, 2]
-
-
 def test_observation_action_runtime_reset_clears_queued_actions_and_counter():
     class ChunkBackend(_FakeBackend):
         def infer(self, request, *, session_id, cache_version):
