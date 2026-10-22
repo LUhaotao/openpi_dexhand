@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+from collections import deque
+import concurrent.futures
 import dataclasses
 import logging
 import threading
-from collections import deque
 from typing import Any, Protocol
 
 import numpy as np
@@ -62,6 +63,8 @@ class _SessionState:
     state_history: deque = dataclasses.field(default_factory=deque)
     left_marker_history: deque = dataclasses.field(default_factory=deque)
     right_marker_history: deque = dataclasses.field(default_factory=deque)
+    prefix_refresh_future: concurrent.futures.Future[CacheInfo] | None = None
+    prefix_refresh_execution_id: int | None = None
     lock: threading.RLock = dataclasses.field(default_factory=threading.RLock)
 
 
@@ -116,9 +119,9 @@ class RuntimeCoordinator:
         self._refresh_after = self._streaming_horizon - self._streaming_watermark
         self._num_steps = int(num_steps)
         backend_metadata = backend.metadata
-        model_metadata = backend_metadata.get("runtime_model") or backend_metadata.get(
-            "fm_worker_metadata", {}
-        ).get("runtime_model", {})
+        model_metadata = backend_metadata.get("runtime_model") or backend_metadata.get("fm_worker_metadata", {}).get(
+            "runtime_model", {}
+        )
         if history_length is None:
             gate_sources = tuple(model_metadata.get("gate_sources", ()))
             history_length = (
@@ -127,6 +130,12 @@ class RuntimeCoordinator:
                 else 1
             )
         self._history_length = int(history_length)
+        # In process mode, VLM encoding and FM cache activation may overlap an
+        # action inference. LocalBackend shares one mutable JAX policy and
+        # therefore keeps prefix updates synchronous.
+        self._prefix_refresh_executor = concurrent.futures.ThreadPoolExecutor(
+            max_workers=1, thread_name_prefix="runtime-vlm-refresh"
+        )
         self._sessions: dict[str, _SessionState] = {}
         self._sessions_lock = threading.Lock()
 
@@ -222,6 +231,7 @@ class RuntimeCoordinator:
         model_observation.pop("session_id", None)
         session = self._session(session_id)
         with session.lock:
+            self._collect_prefix_refresh(session)
             model_observation = self._append_observation_history(model_observation, session)
             if not session.action_queue:
                 execution_id = session.execution_id
@@ -230,16 +240,28 @@ class RuntimeCoordinator:
                     or session.last_prefix_execution_id is None
                     or execution_id - session.last_prefix_execution_id >= self._refresh_after
                 )
-                if needs_refresh:
-                    self._update_prefix(
-                        session,
-                        {
-                            "observation": model_observation,
-                            "session_id": session_id,
-                            "executed_action_id": execution_id,
-                        },
-                    )
-                    session.last_prefix_execution_id = execution_id
+                if needs_refresh and session.prefix_refresh_future is None:
+                    if session.cache_version is not None and getattr(
+                        self._backend, "supports_async_prefix_refresh", False
+                    ):
+                        self._schedule_prefix_refresh(
+                            session,
+                            model_observation,
+                            session_id=session_id,
+                            execution_id=execution_id,
+                        )
+                    elif session.cache_version is None or not getattr(
+                        self._backend, "supports_async_prefix_refresh", False
+                    ):
+                        self._update_prefix(
+                            session,
+                            {
+                                "observation": model_observation,
+                                "session_id": session_id,
+                                "executed_action_id": execution_id,
+                            },
+                        )
+                        session.last_prefix_execution_id = execution_id
 
                 result = self._backend.infer(
                     {
@@ -251,6 +273,12 @@ class RuntimeCoordinator:
                     session_id=session_id,
                     cache_version=session.cache_version,
                 )
+                streaming = result.get("streaming")
+                active_cache_version = streaming.get("cache_version") if isinstance(streaming, dict) else None
+                if not isinstance(active_cache_version, str):
+                    active_cache_version = result.get("cache_version")
+                if isinstance(active_cache_version, str):
+                    session.cache_version = active_cache_version
                 actions = np.asarray(result.get("actions"))
                 if actions.ndim == 1:
                     actions = actions[None, :]
@@ -261,12 +289,64 @@ class RuntimeCoordinator:
             else:
                 action = np.asarray(session.action_queue.popleft())
 
+            self._collect_prefix_refresh(session)
             session.execution_id += 1
             return {"actions": action}
 
-    def _append_observation_history(
-        self, observation: dict[str, Any], session: _SessionState
-    ) -> dict[str, Any]:
+    def _schedule_prefix_refresh(
+        self,
+        session: _SessionState,
+        observation: dict[str, Any],
+        *,
+        session_id: str,
+        execution_id: int,
+    ) -> None:
+        begin_refresh = getattr(self._backend, "begin_prefix_refresh", None)
+        finish_refresh = getattr(self._backend, "finish_prefix_refresh", None)
+        if callable(begin_refresh) and callable(finish_refresh):
+            # Record the delay-conditioning marker before this action's FM
+            # request. The expensive VLM encode/cache activation then overlaps
+            # that inference in the background.
+            refresh = begin_refresh(
+                observation,
+                session_id=session_id,
+                executed_action_id=execution_id,
+            )
+            session.prefix_refresh_future = self._prefix_refresh_executor.submit(finish_refresh, refresh)
+        else:
+            session.prefix_refresh_future = self._prefix_refresh_executor.submit(
+                self._backend.update_prefix,
+                observation,
+                session_id=session_id,
+                executed_action_id=execution_id,
+            )
+        session.prefix_refresh_execution_id = execution_id
+        # Record the requested boundary now. If refresh fails, collection
+        # clears this marker and the next observation retries it.
+        session.last_prefix_execution_id = execution_id
+
+    @staticmethod
+    def _apply_prefix_result(session: _SessionState, info: CacheInfo) -> None:
+        session.cache_id = info.cache_id
+        session.cache_version = info.cache_version
+
+    def _collect_prefix_refresh(self, session: _SessionState, *, wait: bool = False) -> None:
+        future = session.prefix_refresh_future
+        if future is None or (not wait and not future.done()):
+            return
+        execution_id = session.prefix_refresh_execution_id
+        session.prefix_refresh_future = None
+        session.prefix_refresh_execution_id = None
+        try:
+            self._apply_prefix_result(session, future.result())
+        except Exception:
+            logger.exception("Runtime VLM prefix refresh failed")
+            session.last_prefix_execution_id = None
+        else:
+            if execution_id is not None:
+                session.last_prefix_execution_id = execution_id
+
+    def _append_observation_history(self, observation: dict[str, Any], session: _SessionState) -> dict[str, Any]:
         """Retain every uploaded state/tactile frame, including queued-action steps."""
         result = dict(observation)
         if "state" in result:
@@ -277,9 +357,9 @@ class RuntimeCoordinator:
                 if not session.state_history:
                     session.state_history = deque(maxlen=self._history_length)
                 session.state_history.append(state.copy())
-                padded_state = [session.state_history[0]] * (
-                    self._history_length - len(session.state_history)
-                ) + list(session.state_history)
+                padded_state = [session.state_history[0]] * (self._history_length - len(session.state_history)) + list(
+                    session.state_history
+                )
                 result["state"] = np.stack(padded_state, axis=0)
 
         marker_keys = ("left_marker", "right_marker")
@@ -288,18 +368,20 @@ class RuntimeCoordinator:
             raise ValueError("left_marker and right_marker must be provided together")
         if present[0] and self._history_length > 1:
             histories = (session.left_marker_history, session.right_marker_history)
-            for key, history in zip(marker_keys, histories, strict=True):
+            for key, history_deque in zip(marker_keys, histories, strict=True):
                 marker = np.asarray(result[key], dtype=np.float32)
                 if marker.ndim != 3:
                     raise ValueError(f"{key} must be a single marker frame, got shape {marker.shape}")
-                if history.maxlen != self._history_length:
-                    history = deque(history, maxlen=self._history_length)
+                if history_deque.maxlen != self._history_length:
+                    resized_history = deque(history_deque, maxlen=self._history_length)
                     if key == "left_marker":
-                        session.left_marker_history = history
+                        session.left_marker_history = resized_history
                     else:
-                        session.right_marker_history = history
-                history.append(marker.copy())
-                padded = [history[0]] * (self._history_length - len(history)) + list(history)
+                        session.right_marker_history = resized_history
+                else:
+                    resized_history = history_deque
+                resized_history.append(marker.copy())
+                padded = [resized_history[0]] * (self._history_length - len(resized_history)) + list(resized_history)
                 result[key] = np.stack(padded, axis=0)
         return result
 
@@ -307,6 +389,9 @@ class RuntimeCoordinator:
         clear_prefix_cache = request.get("clear_prefix_cache", False)
         if not isinstance(clear_prefix_cache, bool):
             raise ValueError("clear_prefix_cache must be a boolean")
+        # Don't let a prefix refresh finish after reset and reactivate stale
+        # cache state for the new episode.
+        self._collect_prefix_refresh(session, wait=True)
         result = self._backend.reset(session_id=session_id, clear_prefix_cache=clear_prefix_cache)
         session.execution_id = 0
         session.last_prefix_execution_id = None
@@ -327,6 +412,7 @@ class RuntimeCoordinator:
             return
         try:
             with session.lock:
+                self._collect_prefix_refresh(session, wait=True)
                 self._backend.reset(session_id=session_id, clear_prefix_cache=False)
         except Exception:
             logger.exception("Failed to reset Runtime session %s", session_id)
@@ -335,4 +421,5 @@ class RuntimeCoordinator:
                 self._sessions.pop(session_id, None)
 
     def close(self) -> None:
+        self._prefix_refresh_executor.shutdown(wait=True, cancel_futures=False)
         self._backend.close()

@@ -1,4 +1,4 @@
-from scripts import serve_runtime
+from openpi.serving import worker_health
 
 
 class _FakeSocket:
@@ -25,9 +25,9 @@ class _LiveProcess:
 
 def test_worker_readiness_probe_uses_health_http_request(monkeypatch):
     sock = _FakeSocket()
-    monkeypatch.setattr(serve_runtime.socket, "create_connection", lambda *_args, **_kwargs: sock)
-    monkeypatch.setattr(serve_runtime.time, "monotonic", lambda: 0.0)
+    monkeypatch.setattr(worker_health.socket, "create_connection", lambda *_args, **_kwargs: sock)
+    monkeypatch.setattr(worker_health.time, "monotonic", lambda: 0.0)
 
-    serve_runtime._wait_for_worker(_LiveProcess(), 12345, timeout=1.0)
+    worker_health.wait_for_worker(_LiveProcess(), 12345, timeout=1.0)
 
     assert sock.sent.startswith(b"GET /healthz HTTP/1.1\r\n")

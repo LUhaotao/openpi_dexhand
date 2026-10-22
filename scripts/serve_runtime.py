@@ -12,7 +12,6 @@ import logging
 import multiprocessing
 import os
 import socket
-import time
 from typing import Literal
 
 import tyro
@@ -21,6 +20,7 @@ from openpi.serving import runtime as _runtime
 from openpi.serving import websocket_policy_server
 from openpi.serving.backends import LocalBackend
 from openpi.serving.backends import ProcessBackend
+from openpi.serving.worker_health import wait_for_worker as _wait_for_worker
 
 # Reuse the existing checkpoint/environment argument types and policy loader only
 # inside worker processes.  Importing this module does not create a policy or touch
@@ -113,27 +113,6 @@ def _make_worker_args(
         streaming_inference_mode=args.streaming_inference_mode,  # type: ignore[arg-type]
         policy=args.policy,
     )
-
-
-def _wait_for_worker(process: multiprocessing.Process, port: int, timeout: float) -> None:
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        if not process.is_alive():
-            raise RuntimeError(f"Runtime worker exited before opening port {port}")
-        try:
-            with socket.create_connection(("127.0.0.1", port), timeout=0.5) as sock:
-                sock.sendall(
-                    b"GET /healthz HTTP/1.1\r\n"
-                    b"Host: 127.0.0.1\r\n"
-                    b"Connection: close\r\n\r\n"
-                )
-                status_line = sock.recv(256).split(b"\r\n", 1)[0]
-            if status_line.startswith(b"HTTP/1.1 200 ") or status_line.startswith(b"HTTP/1.0 200 "):
-                return
-            time.sleep(0.2)
-        except OSError:
-            time.sleep(0.2)
-    raise TimeoutError(f"Timed out waiting for Runtime worker on port {port}")
 
 
 def _terminate_workers(processes: list[multiprocessing.Process]) -> None:

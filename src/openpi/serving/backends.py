@@ -97,11 +97,13 @@ class LocalBackend:
 
     def reset(self, *, session_id: str, clear_prefix_cache: bool) -> dict[str, Any]:
         with self._lock:
-            return self._worker.infer({
-                "op": "reset_stream",
-                "session_id": session_id,
-                "clear_prefix_cache": clear_prefix_cache,
-            })
+            return self._worker.infer(
+                {
+                    "op": "reset_stream",
+                    "session_id": session_id,
+                    "clear_prefix_cache": clear_prefix_cache,
+                }
+            )
 
     def close(self) -> None:
         return None
@@ -109,6 +111,10 @@ class LocalBackend:
 
 class ProcessBackend:
     """Coordinate the private VLM/FM processes through control WebSockets."""
+
+    # Prefix encoding runs in a separate VLM process and can overlap the active
+    # FM inference. LocalBackend intentionally doesn't advertise this capability.
+    supports_async_prefix_refresh = True
 
     def __init__(
         self,
@@ -153,18 +159,43 @@ class ProcessBackend:
         session_id: str,
         executed_action_id: int | None = None,
     ) -> CacheInfo:
+        refresh = self.begin_prefix_refresh(
+            observation,
+            session_id=session_id,
+            executed_action_id=executed_action_id,
+        )
+        return self.finish_prefix_refresh(refresh)
+
+    def begin_prefix_refresh(
+        self,
+        observation: dict[str, Any],
+        *,
+        session_id: str,
+        executed_action_id: int | None = None,
+    ) -> dict[str, Any]:
+        """Register the observation/action boundary before launching VLM work."""
         del session_id  # The VLM cache is selected by the Runtime session state.
         request_id = f"runtime-{uuid.uuid4().hex}"
         marker_request = {"op": "observation_started", "request_id": request_id}
         if executed_action_id is not None:
             marker_request["executed_action_id"] = int(executed_action_id)
         marker = self._fm_infer(marker_request)
-        descriptor = self._vlm_infer({
-            "op": "encode_prefix_to_shared_memory",
+        return {
             "observation": observation,
-            "observation_request_id": request_id,
+            "request_id": request_id,
             "observation_chunk_id": marker.get("observation_chunk_id"),
-        })
+        }
+
+    def finish_prefix_refresh(self, refresh: dict[str, Any]) -> CacheInfo:
+        """Encode a registered VLM prefix and activate its cache on FM."""
+        descriptor = self._vlm_infer(
+            {
+                "op": "encode_prefix_to_shared_memory",
+                "observation": refresh["observation"],
+                "observation_request_id": refresh["request_id"],
+                "observation_chunk_id": refresh["observation_chunk_id"],
+            }
+        )
         artifact_id = descriptor.get("artifact_id")
         try:
             activated = self._fm_infer({"op": "activate_shared_memory_prefix", "cache": descriptor})
@@ -190,11 +221,13 @@ class ProcessBackend:
         return self._fm_infer(payload)
 
     def reset(self, *, session_id: str, clear_prefix_cache: bool) -> dict[str, Any]:
-        return self._fm_infer({
-            "op": "reset_stream",
-            "session_id": session_id,
-            "clear_prefix_cache": clear_prefix_cache,
-        })
+        return self._fm_infer(
+            {
+                "op": "reset_stream",
+                "session_id": session_id,
+                "clear_prefix_cache": clear_prefix_cache,
+            }
+        )
 
     def close(self) -> None:
         for client in (self._vlm, self._fm):

@@ -149,7 +149,7 @@ XLA_PYTHON_CLIENT_PREALLOCATE=false .venv/bin/python scripts/serve_runtime.py \
   --policy.dir /path/to/streaming_checkpoint
 ```
 
-UniVTAC 使用 `policy/openpi/deploy_runtime.yml`，只连接 Runtime 的 `8000` 端口。每个控制周期同步发送一帧 observation 并等待一个 action；推理消息里只有 observation/action。Runtime 在服务端内部维护 execution id、FM chunk action queue 和 VLM refresh waterline，client 无需发送 cache/session/execution 调度字段。`reset_stream` 仅在 episode 开始时作为生命周期控制消息发送。Runtime 的两个 worker 使用随机分配的本机私有端口，原有 VLM/FM 公网端口协议仍然保留。
+UniVTAC 使用 `policy/openpi/deploy_runtime.yml`，只连接 Runtime 的 `8000` 端口。每个控制周期同步发送一帧 observation 并等待一个 action；推理消息里只有 observation/action。Runtime 在服务端内部维护 execution id、FM chunk action queue 和 VLM refresh waterline。首次 prefix 初始化会等待完成；之后到水位时，VLM prefix 编码和 FM KV cache 激活在后台运行，可与当前 FM action inference 重叠。client 无需发送 cache/session/execution 调度字段。`reset_stream` 仅在 episode 开始时作为生命周期控制消息发送；reset 会等待已提交的后台 prefix 更新结束。Runtime 的两个 worker 使用随机分配的本机私有端口，原有 VLM/FM 公网端口协议仍然保留。
 
 单进程也可使用相同 Runtime API，将 backend 切到 `local`。此模式只加载一个本地 JAX policy，KV Cache 直接作为 JAX pytree 传递，不使用 worker WebSocket 或 shared memory：
 
