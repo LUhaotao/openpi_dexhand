@@ -45,13 +45,13 @@ class MultiProcessPolicy:
     vlm_port: int | None = None
     fm_host: str = "127.0.0.1"
     fm_port: int | None = None
-    streaming_inference_mode: Literal["chunk", "action_head"] = "chunk"
+    streaming_inference_mode: Literal["chunk", "action_head", "chunk_heads"] = "chunk"
 
     def __post_init__(self):
         if self.role not in ("vlm", "fm"):
             raise ValueError(f"Unknown multi-process role: {self.role}")
-        if self.streaming_inference_mode not in ("chunk", "action_head"):
-            raise ValueError("streaming_inference_mode must be 'chunk' or 'action_head'")
+        if self.streaming_inference_mode not in ("chunk", "action_head", "chunk_heads"):
+            raise ValueError("streaming_inference_mode must be 'chunk', 'action_head', or 'chunk_heads'")
         self._rng = jax.random.key(0)
         self._cache_id = 0
         self._cache_version: str | None = None
@@ -218,7 +218,7 @@ class MultiProcessPolicy:
         self._block_until_ready(actions)
         if getattr(self.policy._model, "streaming", False):  # noqa: SLF001
             chunk_size = int(self.policy._model.streaming_chunk_size)  # noqa: SLF001
-            if getattr(self, "streaming_inference_mode", "chunk") == "action_head":
+            if getattr(self, "streaming_inference_mode", "chunk") in ("action_head", "chunk_heads"):
                 timestep = self.policy._model.streaming_timestep(actions.dtype)  # noqa: SLF001
                 advanced = self._advance_streaming_head_from_prefix_jit(
                     observation.state,
@@ -804,7 +804,7 @@ class MultiProcessPolicy:
                 **gate_log_context,
                 num_steps=int(request.get("num_steps", 10)),
             )
-            if streaming_mode == "action_head":
+            if streaming_mode in ("action_head", "chunk_heads"):
                 self._streaming_head_step(
                     self._streaming_state,
                     model_observation,
@@ -822,7 +822,7 @@ class MultiProcessPolicy:
             if completed_actions < 0:
                 raise ValueError("executed_action_id cannot move backwards within a stream session")
             if completed_actions:
-                if streaming_mode == "action_head":
+                if streaming_mode in ("action_head", "chunk_heads"):
                     for _ in range(completed_actions):
                         self._streaming_head_step(
                             self._streaming_state,
@@ -857,7 +857,7 @@ class MultiProcessPolicy:
                 self._streaming_state.execution_id = execution_id
 
         chunk_size = int(model.streaming_chunk_size)
-        action_count = 1 if streaming_mode == "action_head" else chunk_size
+        action_count = 1 if streaming_mode in ("action_head", "chunk_heads") else chunk_size
         actions = self._streaming_state.action_window[:, :action_count]
         result = self.policy._output_transform(  # noqa: SLF001
             {"state": np.asarray(model_observation.state[0]), "actions": np.asarray(actions[0])}
@@ -911,10 +911,10 @@ class MultiProcessPolicy:
         timestep = self.policy._model.streaming_timestep(actions.dtype)  # noqa: SLF001
         noise = jax.random.normal(noise_rng, actions.shape, dtype=actions.dtype)
         chunk_size = int(self.policy._model.streaming_chunk_size)  # noqa: SLF001
-        if getattr(self, "streaming_inference_mode", "chunk") == "action_head":
-            # Keep each action at its own chunk timestep. The model still sees
-            # the complete horizon; the policy applies its velocity only to
-            # the queue head and leaves the tail untouched.
+        if getattr(self, "streaming_inference_mode", "chunk") in ("action_head", "chunk_heads"):
+            # Keep each action at its own chunk timestep. The model sees the
+            # complete horizon; head modes apply velocity only at selected
+            # queue positions and leave the other actions untouched.
             noisy_actions = (
                 timestep[None, :, None] * noise
                 + (1.0 - timestep[None, :, None]) * actions
@@ -943,7 +943,7 @@ class MultiProcessPolicy:
         gate_log_context: dict[str, Any],
         consume: bool,
     ) -> None:
-        """Update one queue head and leave all tail actions untouched."""
+        """Update the queue head, plus later chunk heads in chunk-head mode."""
         if stream_state.timestep_window is None:
             raise RuntimeError("Action-head streaming state is missing timestep metadata")
 
@@ -975,15 +975,23 @@ class MultiProcessPolicy:
             observation_delay_tokens=observation_delay_tokens,
             **gate_log_context,
         )
-        head = action_window[:, :1]
-        current_timestep = timestep_window[:1][None, :, None].astype(head.dtype)
-        updated_head = head - current_timestep * velocity[:, :1]
-        stream_state.action_window = jnp.concatenate(
-            [updated_head, action_window[:, 1:]], axis=1
-        )
-        stream_state.timestep_window = jnp.concatenate(
-            [jnp.zeros((1,), dtype=timestep_window.dtype), timestep_window[1:]], axis=0
-        )
+        if getattr(self, "streaming_inference_mode", "chunk") == "chunk_heads":
+            chunk_size = int(self.policy._model.streaming_chunk_size)  # noqa: SLF001
+            update_mask = jnp.arange(action_window.shape[1]) % chunk_size == 0
+            update_mask_3d = update_mask[None, :, None]
+            update_amount = timestep_window[None, :, None].astype(action_window.dtype) * velocity
+            stream_state.action_window = action_window - jnp.where(update_mask_3d, update_amount, 0.0)
+            stream_state.timestep_window = jnp.where(update_mask, 0.0, timestep_window)
+        else:
+            head = action_window[:, :1]
+            current_timestep = timestep_window[:1][None, :, None].astype(head.dtype)
+            updated_head = head - current_timestep * velocity[:, :1]
+            stream_state.action_window = jnp.concatenate(
+                [updated_head, action_window[:, 1:]], axis=1
+            )
+            stream_state.timestep_window = jnp.concatenate(
+                [jnp.zeros((1,), dtype=timestep_window.dtype), timestep_window[1:]], axis=0
+            )
 
     def _infer_fm(self, request: dict[str, Any]) -> dict[str, Any]:
         prefix_cache, cache_version, previous_version, cache_observation_chunk_id, _ = self._snapshot_cache()

@@ -265,3 +265,41 @@ def test_action_head_step_updates_only_the_head(monkeypatch):
     )
     assert jnp.allclose(stream_state.action_window, jnp.asarray([[[-3.0], [3.0], [9.0]]]))
     assert jnp.allclose(stream_state.timestep_window, jnp.asarray([0.0, 1.0, 1.0]))
+
+
+def test_chunk_heads_updates_every_local_chunk_head(monkeypatch):
+    policy = object.__new__(MultiProcessPolicy)
+    policy._rng = jax.random.key(0)
+    policy.streaming_inference_mode = "chunk_heads"
+    policy.policy = SimpleNamespace(_model=SimpleNamespace(streaming_chunk_size=5))
+    policy._advance_streaming_head_from_prefix_jit = (
+        lambda state, prefix, window, timestep, **kwargs: jnp.full_like(window, 2.0)
+    )
+    stream_state = _StreamingState(
+        "test",
+        0,
+        jnp.ones((1, 10, 1)),
+        jnp.asarray([0.1] * 5 + [0.2] * 5),
+    )
+    observation = SimpleNamespace(
+        state=jnp.zeros((1, 1)),
+        tactile_left_marker_history=None,
+        tactile_right_marker_history=None,
+        torque_history=None,
+        state_history=None,
+    )
+
+    policy._streaming_head_step(
+        stream_state,
+        observation,
+        {},
+        tactile_condition=None,
+        observation_delay_chunks=None,
+        gate_log_context={},
+        consume=False,
+    )
+
+    expected_actions = jnp.asarray([0.8] + [1.0] * 4 + [0.6] + [1.0] * 4)
+    expected_timesteps = jnp.asarray([0.0] + [0.1] * 4 + [0.0] + [0.2] * 4)
+    assert jnp.allclose(stream_state.action_window[0, :, 0], expected_actions)
+    assert jnp.allclose(stream_state.timestep_window, expected_timesteps)

@@ -54,6 +54,7 @@ class Args:
     # observations; action-window refill and cache refresh are server policy.
     streaming_horizon: int = 50
     streaming_watermark: int = 40
+    streaming_inference_mode: Literal["chunk", "action_head", "chunk_heads"] = "chunk_heads"
     num_steps: int = 10
     # Optional override; defaults to the selected model's gate history length.
     history_length: int | None = None
@@ -109,6 +110,7 @@ def _make_worker_args(
         fm_port=fm_port,
         fm_host="127.0.0.1",
         multi_process_role=role,
+        streaming_inference_mode=args.streaming_inference_mode,  # type: ignore[arg-type]
         policy=args.policy,
     )
 
@@ -150,11 +152,12 @@ def _serve_local(args: Args) -> None:
         policy=args.policy,
     )
     policy = _serve_policy.create_policy(policy_args)
-    backend = LocalBackend(policy)
+    backend = LocalBackend(policy, streaming_inference_mode=args.streaming_inference_mode)
     coordinator = _runtime.RuntimeCoordinator(
         backend,
         streaming_horizon=args.streaming_horizon,
         streaming_watermark=args.streaming_watermark,
+        refresh_prefix_every_action=args.streaming_inference_mode != "chunk",
         num_steps=args.num_steps,
         history_length=args.history_length,
     )
@@ -230,6 +233,7 @@ def main(args: Args) -> None:
             backend,
             streaming_horizon=args.streaming_horizon,
             streaming_watermark=args.streaming_watermark,
+            refresh_prefix_every_action=args.streaming_inference_mode != "chunk",
             num_steps=args.num_steps,
             history_length=args.history_length,
         )

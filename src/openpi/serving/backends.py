@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import logging
 import threading
-from typing import Any
+from typing import Any, Literal
 import uuid
 
 from openpi_client.websocket_client_policy import WebsocketClientPolicy
@@ -38,12 +38,19 @@ def _runtime_model_metadata(model: Any) -> dict[str, Any]:
 class LocalBackend:
     """Run VLM and FM computations in one process using direct JAX objects."""
 
-    def __init__(self, policy: _policy.Policy):
+    def __init__(
+        self,
+        policy: _policy.Policy,
+        *,
+        streaming_inference_mode: Literal["chunk", "action_head", "chunk_heads"] = "chunk",
+    ):
         self._policy = policy
         # MultiProcessPolicy already contains the streaming/cache implementation
         # used by the split workers.  Here it is only a local JAX coordinator; no
         # worker thread or network transport is created.
-        self._worker = _multi_process_policy.MultiProcessPolicy(policy, "fm")
+        self._worker = _multi_process_policy.MultiProcessPolicy(
+            policy, "fm", streaming_inference_mode=streaming_inference_mode
+        )
         self._lock = threading.RLock()
 
     @property

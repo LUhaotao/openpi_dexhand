@@ -194,4 +194,10 @@ openpi这个代码的Config记录很有问题，每一个Train-Infer必须成对
 
 ## version 0.3.3
 
-- [] server runtime
+- [*] server runtime
+
+## version 0.4
+
+- [] 一套全新的server，采用滑动窗口的方式让动作既有实时性又能收益于chunk的一致性
+
+我们的关键发现是**chunk越小动作越会迟疑、慢**，调研下发现这是动作chunk内保持了较好的连续性，但是chunk间会出现较大的jerk，可能出现回退停顿等等现象，我们考虑在SDP基础上，一次前向算出所有噪声（向量场）后只针对每个chunk的第一个token进行采样，并且向右滑动一次窗口
