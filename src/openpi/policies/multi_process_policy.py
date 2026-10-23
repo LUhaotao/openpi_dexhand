@@ -979,9 +979,16 @@ class MultiProcessPolicy:
             chunk_size = int(self.policy._model.streaming_chunk_size)  # noqa: SLF001
             update_mask = jnp.arange(action_window.shape[1]) % chunk_size == 0
             update_mask_3d = update_mask[None, :, None]
-            update_amount = timestep_window[None, :, None].astype(action_window.dtype) * velocity
+            num_chunks = action_window.shape[1] // chunk_size
+            chunk_dt = jnp.asarray(1.0 / num_chunks, dtype=action_window.dtype)
+            effective_dt = jnp.minimum(timestep_window, chunk_dt)
+            update_amount = effective_dt[None, :, None] * velocity
             stream_state.action_window = action_window - jnp.where(update_mask_3d, update_amount, 0.0)
-            stream_state.timestep_window = jnp.where(update_mask, 0.0, timestep_window)
+            stream_state.timestep_window = jnp.where(
+                update_mask,
+                jnp.maximum(timestep_window - chunk_dt, 0.0),
+                timestep_window,
+            )
         else:
             head = action_window[:, :1]
             current_timestep = timestep_window[:1][None, :, None].astype(head.dtype)

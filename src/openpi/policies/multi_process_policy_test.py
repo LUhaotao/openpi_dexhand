@@ -278,8 +278,8 @@ def test_chunk_heads_updates_every_local_chunk_head(monkeypatch):
     stream_state = _StreamingState(
         "test",
         0,
-        jnp.ones((1, 10, 1)),
-        jnp.asarray([0.1] * 5 + [0.2] * 5),
+        jnp.ones((1, 50, 1)),
+        jnp.repeat(jnp.arange(1, 11, dtype=jnp.float32) / 10, 5),
     )
     observation = SimpleNamespace(
         state=jnp.zeros((1, 1)),
@@ -299,7 +299,20 @@ def test_chunk_heads_updates_every_local_chunk_head(monkeypatch):
         consume=False,
     )
 
-    expected_actions = jnp.asarray([0.8] + [1.0] * 4 + [0.6] + [1.0] * 4)
-    expected_timesteps = jnp.asarray([0.0] + [0.1] * 4 + [0.0] + [0.2] * 4)
+    expected_actions = jnp.ones((50,)).at[::5].set(0.8)
+    expected_timesteps = jnp.repeat(jnp.arange(1, 11, dtype=jnp.float32) / 10, 5)
+    expected_timesteps = expected_timesteps.at[::5].add(-0.1)
     assert jnp.allclose(stream_state.action_window[0, :, 0], expected_actions)
     assert jnp.allclose(stream_state.timestep_window, expected_timesteps)
+
+    policy._streaming_head_step(
+        stream_state,
+        observation,
+        {},
+        tactile_condition=None,
+        observation_delay_chunks=None,
+        gate_log_context={},
+        consume=True,
+    )
+    assert jnp.allclose(stream_state.timestep_window[::5], jnp.arange(10, dtype=jnp.float32) / 10)
+    assert jnp.allclose(stream_state.timestep_window[-1], 1.0)
