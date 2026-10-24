@@ -12,8 +12,10 @@ import logging
 import multiprocessing
 import os
 import socket
+import threading
 from typing import Literal
 
+import numpy as np
 import tyro
 
 from openpi.serving import runtime as _runtime
@@ -54,6 +56,8 @@ class _DiffusionRuntimeAdapter:
 
     def __init__(self, policy: _serve_policy._policy.Policy):
         self._policy = policy
+        self._runtime_sessions: set[str] = set()
+        self._session_lock = threading.Lock()
 
     @property
     def metadata(self) -> dict:
@@ -69,6 +73,8 @@ class _DiffusionRuntimeAdapter:
             if not isinstance(clear_prefix_cache, bool):
                 raise ValueError("clear_prefix_cache must be a boolean")
             self._policy.reset_tactile_history(session_id)
+            with self._session_lock:
+                self._runtime_sessions.add(session_id)
             return {
                 "protocol_version": 1,
                 "session_id": session_id,
@@ -83,13 +89,25 @@ class _DiffusionRuntimeAdapter:
         elif op is not None:
             raise ValueError(f"Unsupported diffusion Runtime operation: {op}")
 
-        return self._policy.infer(request, session_id=session_id)
+        result = self._policy.infer(request, session_id=session_id)
+        with self._session_lock:
+            runtime_session = session_id in self._runtime_sessions
+        if runtime_session and "actions" in result:
+            actions = np.asarray(result["actions"])
+            if actions.ndim == 1:
+                actions = actions[None, :]
+            if actions.ndim != 2 or actions.shape[0] == 0:
+                raise ValueError("Diffusion policy must return a non-empty action sequence")
+            result = {**result, "actions": actions[:1]}
+        return result
 
     def infer(self, request: dict) -> dict:
         return self.infer_with_session(request, session_id="default")
 
     def reset_tactile_history(self, session_id: str) -> None:
         self._policy.reset_tactile_history(session_id)
+        with self._session_lock:
+            self._runtime_sessions.discard(session_id)
 
     def close(self) -> None:
         pass
