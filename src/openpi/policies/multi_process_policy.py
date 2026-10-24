@@ -45,13 +45,13 @@ class MultiProcessPolicy:
     vlm_port: int | None = None
     fm_host: str = "127.0.0.1"
     fm_port: int | None = None
-    streaming_inference_mode: Literal["chunk", "action_head", "chunk_heads"] = "chunk"
+    streaming_inference_mode: Literal["chunk", "chunk_heads"] = "chunk"
 
     def __post_init__(self):
         if self.role not in ("vlm", "fm"):
             raise ValueError(f"Unknown multi-process role: {self.role}")
-        if self.streaming_inference_mode not in ("chunk", "action_head", "chunk_heads"):
-            raise ValueError("streaming_inference_mode must be 'chunk', 'action_head', or 'chunk_heads'")
+        if self.streaming_inference_mode not in ("chunk", "chunk_heads"):
+            raise ValueError("streaming_inference_mode must be 'chunk' or 'chunk_heads'")
         self._rng = jax.random.key(0)
         self._cache_id = 0
         self._cache_version: str | None = None
@@ -218,7 +218,7 @@ class MultiProcessPolicy:
         self._block_until_ready(actions)
         if getattr(self.policy._model, "streaming", False):  # noqa: SLF001
             chunk_size = int(self.policy._model.streaming_chunk_size)  # noqa: SLF001
-            if getattr(self, "streaming_inference_mode", "chunk") in ("action_head", "chunk_heads"):
+            if getattr(self, "streaming_inference_mode", "chunk") == "chunk_heads":
                 timestep = self.policy._model.streaming_timestep(actions.dtype)  # noqa: SLF001
                 advanced = self._advance_streaming_head_from_prefix_jit(
                     observation.state,
@@ -804,7 +804,7 @@ class MultiProcessPolicy:
                 **gate_log_context,
                 num_steps=int(request.get("num_steps", 10)),
             )
-            if streaming_mode in ("action_head", "chunk_heads"):
+            if streaming_mode == "chunk_heads":
                 self._streaming_head_step(
                     self._streaming_state,
                     model_observation,
@@ -822,7 +822,7 @@ class MultiProcessPolicy:
             if completed_actions < 0:
                 raise ValueError("executed_action_id cannot move backwards within a stream session")
             if completed_actions:
-                if streaming_mode in ("action_head", "chunk_heads"):
+                if streaming_mode == "chunk_heads":
                     for _ in range(completed_actions):
                         self._streaming_head_step(
                             self._streaming_state,
@@ -857,7 +857,7 @@ class MultiProcessPolicy:
                 self._streaming_state.execution_id = execution_id
 
         chunk_size = int(model.streaming_chunk_size)
-        action_count = 1 if streaming_mode in ("action_head", "chunk_heads") else chunk_size
+        action_count = 1 if streaming_mode == "chunk_heads" else chunk_size
         actions = self._streaming_state.action_window[:, :action_count]
         result = self.policy._output_transform(  # noqa: SLF001
             {"state": np.asarray(model_observation.state[0]), "actions": np.asarray(actions[0])}
@@ -911,7 +911,7 @@ class MultiProcessPolicy:
         timestep = self.policy._model.streaming_timestep(actions.dtype)  # noqa: SLF001
         noise = jax.random.normal(noise_rng, actions.shape, dtype=actions.dtype)
         chunk_size = int(self.policy._model.streaming_chunk_size)  # noqa: SLF001
-        if getattr(self, "streaming_inference_mode", "chunk") in ("action_head", "chunk_heads"):
+        if getattr(self, "streaming_inference_mode", "chunk") == "chunk_heads":
             # Keep each action at its own chunk timestep. The model sees the
             # complete horizon; head modes apply velocity only at selected
             # queue positions and leave the other actions untouched.

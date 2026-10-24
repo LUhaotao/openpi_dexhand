@@ -1,4 +1,4 @@
-"""Start a Runtime endpoint or a direct single-process diffusion endpoint.
+"""Start the Runtime endpoint with local or process-backed inference workers.
 
 This is an additional deployment mode.  ``scripts/serve_policy.py`` remains the
 entry point for the existing single-process and client-coordinated multi-process
@@ -12,14 +12,13 @@ import logging
 import multiprocessing
 import os
 import socket
-import threading
 from typing import Literal
 
-import numpy as np
 import tyro
 
 from openpi.serving import runtime as _runtime
 from openpi.serving import websocket_policy_server
+from openpi.serving.backends import DiffusionBackend
 from openpi.serving.backends import LocalBackend
 from openpi.serving.backends import ProcessBackend
 from openpi.serving.worker_health import wait_for_worker as _wait_for_worker
@@ -42,97 +41,21 @@ Default = _serve_policy.Default
 EnvMode = _serve_policy.EnvMode
 
 
-class _DiffusionRuntimeAdapter:
-    """Expose the legacy policy through the small Runtime client protocol.
-
-    UniVTAC's ``client_type: runtime`` sends a reset control message when a
-    websocket is opened.  A plain :class:`Policy` expects every message to be
-    an observation, so handle that lifecycle message here while keeping all
-    actual inference on the non-streaming policy path.
-    """
-
-    tactile_history_enabled = True
-    observation_action_protocol = True
-
-    def __init__(self, policy: _serve_policy._policy.Policy):
-        self._policy = policy
-        self._runtime_sessions: set[str] = set()
-        self._session_lock = threading.Lock()
-
-    @property
-    def metadata(self) -> dict:
-        return self._policy.metadata
-
-    def warmup(self) -> None:
-        self._policy.warmup()
-
-    def infer_with_session(self, request: dict, *, session_id: str) -> dict:
-        op = request.get("op")
-        if op in ("reset", "reset_stream"):
-            clear_prefix_cache = request.get("clear_prefix_cache", False)
-            if not isinstance(clear_prefix_cache, bool):
-                raise ValueError("clear_prefix_cache must be a boolean")
-            self._policy.reset_tactile_history(session_id)
-            with self._session_lock:
-                self._runtime_sessions.add(session_id)
-            return {
-                "protocol_version": 1,
-                "session_id": session_id,
-                "status": "reset",
-                "prefix_cache_cleared": clear_prefix_cache,
-            }
-
-        if op == "infer":
-            if "observation" not in request:
-                raise ValueError("infer requires an observation")
-            request = request["observation"]
-        elif op is not None:
-            raise ValueError(f"Unsupported diffusion Runtime operation: {op}")
-
-        result = self._policy.infer(request, session_id=session_id)
-        with self._session_lock:
-            runtime_session = session_id in self._runtime_sessions
-        if runtime_session and "actions" in result:
-            actions = np.asarray(result["actions"])
-            if actions.ndim == 1:
-                actions = actions[None, :]
-            if actions.ndim != 2 or actions.shape[0] == 0:
-                raise ValueError("Diffusion policy must return a non-empty action sequence")
-            result = {**result, "actions": actions[:1]}
-        return result
-
-    def infer(self, request: dict) -> dict:
-        return self.infer_with_session(request, session_id="default")
-
-    def reset_tactile_history(self, session_id: str) -> None:
-        self._policy.reset_tactile_history(session_id)
-        with self._session_lock:
-            self._runtime_sessions.discard(session_id)
-
-    def close(self) -> None:
-        pass
-
-
 @dataclasses.dataclass
 class Args:
-    """Arguments for the Runtime-managed deployment.
-
-    ``process`` and ``local`` use RuntimeCoordinator's streaming protocol.
-    ``diffusion`` serves the policy directly in one process through the legacy
-    non-streaming inference path.
-    """
+    """Arguments for the Runtime-managed deployment."""
 
     env: EnvMode = EnvMode.ALOHA_SIM
     default_prompt: str | None = None
     port: int = 8000
-    mode: Literal["process", "local", "diffusion"] = "process"
+    mode: Literal["process", "local"] = "process"
+    inference_mode: Literal["stream", "stream-head", "diffusion"] = "stream-head"
     save_gate_logs: bool = False
     worker_start_timeout: float = 300.0
     # Runtime-owned VLM refresh schedule.  The public client only sends
     # observations; action-window refill and cache refresh are server policy.
     streaming_horizon: int = 50
     streaming_watermark: int = 40
-    streaming_inference_mode: Literal["chunk", "action_head", "chunk_heads"] = "chunk_heads"
     num_steps: int = 10
     # Optional override; defaults to the selected model's gate history length.
     history_length: int | None = None
@@ -176,6 +99,9 @@ def _make_worker_args(
     fm_port: int,
     vlm_port: int,
 ) -> _serve_policy.Args:
+    if args.inference_mode == "diffusion":
+        raise ValueError("process mode does not support inference_mode='diffusion'")
+    streaming_inference_mode = "chunk" if args.inference_mode == "stream" else "chunk_heads"
     return _serve_policy.Args(
         env=args.env,
         default_prompt=args.default_prompt,
@@ -188,7 +114,7 @@ def _make_worker_args(
         fm_port=fm_port,
         fm_host="127.0.0.1",
         multi_process_role=role,
-        streaming_inference_mode=args.streaming_inference_mode,  # type: ignore[arg-type]
+        streaming_inference_mode=streaming_inference_mode,  # type: ignore[arg-type]
         policy=args.policy,
     )
 
@@ -217,13 +143,18 @@ def _serve_local(args: Args) -> None:
         policy=args.policy,
     )
     policy = _serve_policy.create_policy(policy_args)
-    backend = LocalBackend(policy, streaming_inference_mode=args.streaming_inference_mode)
+    if args.inference_mode == "diffusion":
+        backend = DiffusionBackend(policy)
+    else:
+        streaming_inference_mode = "chunk" if args.inference_mode == "stream" else "chunk_heads"
+        backend = LocalBackend(policy, streaming_inference_mode=streaming_inference_mode)
     coordinator = _runtime.RuntimeCoordinator(
         backend,
         streaming_horizon=args.streaming_horizon,
         streaming_watermark=args.streaming_watermark,
         num_steps=args.num_steps,
         history_length=args.history_length,
+        inference_mode=args.inference_mode,
     )
     coordinator.warmup()
     metadata = {**coordinator.metadata, "runtime": "local"}
@@ -239,45 +170,14 @@ def _serve_local(args: Args) -> None:
         coordinator.close()
 
 
-def _serve_diffusion(args: Args) -> None:
-    """Serve the policy directly in one process without Runtime streaming."""
-    if args.cuda_device is not None:
-        if args.cuda_device < 0:
-            raise ValueError("cuda_device must be non-negative")
-        os.environ["CUDA_VISIBLE_DEVICES"] = str(args.cuda_device)
-
-    policy_args = _serve_policy.Args(
-        env=args.env,
-        default_prompt=args.default_prompt,
-        port=args.port,
-        record=False,
-        save_gate_logs=args.save_gate_logs,
-        multi_process=False,
-        policy=args.policy,
-    )
-    policy = _serve_policy.create_policy(policy_args)
-    logger.info("Warming up non-streaming diffusion policy")
-    policy.warmup()
-    diffusion_policy = _DiffusionRuntimeAdapter(policy)
-    metadata = {**policy.metadata, "runtime": "diffusion", "inference_mode": "diffusion"}
-    server = websocket_policy_server.WebsocketPolicyServer(
-        policy=diffusion_policy,
-        host="0.0.0.0",
-        port=args.port,
-        metadata=metadata,
-    )
-    server.serve_forever()
-
-
 def main(args: Args) -> None:
     if not 1 <= args.port <= 65535:
         raise ValueError("port must be in [1, 65535]")
     if args.mode == "local":
         _serve_local(args)
         return
-    if args.mode == "diffusion":
-        _serve_diffusion(args)
-        return
+    if args.inference_mode == "diffusion":
+        raise ValueError("inference_mode='diffusion' is only supported with mode='local'")
     if args.vlm_cuda_device < 0 or args.fm_cuda_device < 0:
         raise ValueError("CUDA device indices must be non-negative")
     if args.vlm_cuda_device == args.fm_cuda_device:
@@ -332,6 +232,7 @@ def main(args: Args) -> None:
             streaming_watermark=args.streaming_watermark,
             num_steps=args.num_steps,
             history_length=args.history_length,
+            inference_mode=args.inference_mode,
         )
         coordinator.warmup()
         metadata = coordinator.metadata

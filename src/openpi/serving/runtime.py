@@ -7,11 +7,13 @@ import concurrent.futures
 import dataclasses
 import logging
 import threading
-from typing import Any, Protocol
+from typing import Any, Literal, Protocol
 
 import numpy as np
 
 logger = logging.getLogger(__name__)
+
+InferenceMode = Literal["stream", "stream-head", "diffusion"]
 
 
 @dataclasses.dataclass(frozen=True)
@@ -69,7 +71,7 @@ class _SessionState:
 
 
 class RuntimeCoordinator:
-    """Coordinate sessions and requests without knowing the backend transport."""
+    """Coordinate Runtime sessions without knowing worker transport or algorithm."""
 
     # WebsocketPolicyServer uses this flag to route requests through
     # ``infer_with_session`` and to reset session state when a connection closes.
@@ -91,6 +93,7 @@ class RuntimeCoordinator:
         streaming_watermark: int = 40,
         num_steps: int = 10,
         history_length: int | None = None,
+        inference_mode: InferenceMode = "stream",
     ):
         if backend is None:
             if vlm_host is None or vlm_port is None or fm_host is None or fm_port is None:
@@ -112,12 +115,15 @@ class RuntimeCoordinator:
             raise ValueError("streaming_watermark must be in [0, streaming_horizon)")
         if num_steps <= 0:
             raise ValueError("num_steps must be positive")
+        if inference_mode not in ("stream", "stream-head", "diffusion"):
+            raise ValueError("inference_mode must be 'stream', 'stream-head', or 'diffusion'")
         if history_length is not None and history_length <= 0:
             raise ValueError("history_length must be positive")
         self._streaming_horizon = int(streaming_horizon)
         self._streaming_watermark = int(streaming_watermark)
         self._refresh_after = self._streaming_horizon - self._streaming_watermark
         self._num_steps = int(num_steps)
+        self._inference_mode = inference_mode
         backend_metadata = backend.metadata
         model_metadata = backend_metadata.get("runtime_model") or backend_metadata.get("fm_worker_metadata", {}).get(
             "runtime_model", {}
@@ -141,7 +147,7 @@ class RuntimeCoordinator:
 
     @property
     def metadata(self) -> dict[str, Any]:
-        return {**self._backend.metadata, **self._metadata}
+        return {**self._backend.metadata, "inference_mode": self._inference_mode, **self._metadata}
 
     def warmup(self) -> None:
         self._backend.warmup()
@@ -166,6 +172,15 @@ class RuntimeCoordinator:
         session_id = request.get("session_id", "default")
         if not isinstance(session_id, str) or not session_id:
             raise ValueError("session_id must be a non-empty string")
+
+        if self._inference_mode == "diffusion" and op == "infer":
+            if "observation" not in request:
+                raise ValueError("infer requires an observation")
+            observation = dict(request["observation"])
+            observation["session_id"] = session_id
+            return self._infer_observation(observation)
+        if self._inference_mode == "diffusion" and op in ("stream_infer", "update_vlm", "encode_prefix"):
+            raise ValueError(f"{op} is unavailable in diffusion inference mode")
 
         session = self._session(session_id)
         with session.lock:
@@ -219,8 +234,8 @@ class RuntimeCoordinator:
         """Run one synchronous observation/action step for the public client.
 
         The Runtime owns execution ids, prefix refresh scheduling, and the
-        action queue.  A chunk-mode worker may therefore produce several
-        actions while the client still receives exactly one action per frame.
+        action queue. A worker may therefore produce several actions while the
+        client still receives exactly one action per frame.
         """
         session_id = observation.get("session_id", "default")
         if not isinstance(session_id, str) or not session_id:
@@ -235,6 +250,26 @@ class RuntimeCoordinator:
             model_observation = self._append_observation_history(model_observation, session)
             if not session.action_queue:
                 execution_id = session.execution_id
+                if self._inference_mode == "diffusion":
+                    result = self._backend.infer(
+                        {
+                            "op": "infer",
+                            "observation": model_observation,
+                            "num_steps": self._num_steps,
+                        },
+                        session_id=session_id,
+                        cache_version=None,
+                    )
+                    actions = np.asarray(result.get("actions"))
+                    if actions.ndim == 1:
+                        actions = actions[None, :]
+                    if actions.ndim != 2 or actions.shape[0] == 0:
+                        raise ValueError("Runtime worker must return a non-empty action sequence")
+                    session.action_queue.extend(np.asarray(action) for action in actions[1:])
+                    action = np.asarray(actions[0])
+                    session.execution_id += 1
+                    return {"actions": action}
+
                 needs_refresh = (
                     session.cache_version is None
                     or session.last_prefix_execution_id is None

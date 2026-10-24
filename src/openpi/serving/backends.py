@@ -42,7 +42,7 @@ class LocalBackend:
         self,
         policy: _policy.Policy,
         *,
-        streaming_inference_mode: Literal["chunk", "action_head", "chunk_heads"] = "chunk",
+        streaming_inference_mode: Literal["chunk", "chunk_heads"] = "chunk",
     ):
         self._policy = policy
         # MultiProcessPolicy already contains the streaming/cache implementation
@@ -104,6 +104,61 @@ class LocalBackend:
                     "clear_prefix_cache": clear_prefix_cache,
                 }
             )
+
+    def close(self) -> None:
+        return None
+
+
+class DiffusionBackend:
+    """Run the complete non-streaming policy inside the Runtime process."""
+
+    def __init__(self, policy: _policy.Policy):
+        self._policy = policy
+        self._lock = threading.RLock()
+
+    @property
+    def metadata(self) -> dict[str, Any]:
+        model = self._policy._model  # noqa: SLF001
+        return {
+            **self._policy.metadata,
+            "backend": "diffusion",
+            "runtime_model": _runtime_model_metadata(model),
+        }
+
+    def warmup(self) -> None:
+        with self._lock:
+            self._policy.warmup()
+
+    def update_prefix(
+        self,
+        observation: dict[str, Any],
+        *,
+        session_id: str,
+        executed_action_id: int | None = None,
+    ) -> CacheInfo:
+        raise RuntimeError("DiffusionBackend does not use a prefix cache")
+
+    def infer(
+        self,
+        request: dict[str, Any],
+        *,
+        session_id: str,
+        cache_version: str | None,
+    ) -> dict[str, Any]:
+        del cache_version
+        observation = request.get("observation", request)
+        with self._lock:
+            return self._policy.infer(observation, session_id=session_id)
+
+    def reset(self, *, session_id: str, clear_prefix_cache: bool) -> dict[str, Any]:
+        with self._lock:
+            self._policy.reset_tactile_history(session_id)
+        return {
+            "protocol_version": 1,
+            "session_id": session_id,
+            "status": "reset",
+            "prefix_cache_cleared": clear_prefix_cache,
+        }
 
     def close(self) -> None:
         return None

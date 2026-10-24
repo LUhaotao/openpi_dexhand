@@ -69,10 +69,10 @@ class Args:
     fm_host: str = "127.0.0.1"
     # Serve one role only. Use this to pin VLM and FM to separate GPUs.
     multi_process_role: Literal["vlm", "fm"] | None = None
-    # Streaming inference implementation used by the FM worker. ``chunk``
-    # returns a full action chunk; ``action_head`` updates only the queue head;
-    # ``chunk_heads`` updates each local chunk head and returns one action.
-    streaming_inference_mode: Literal["chunk", "action_head", "chunk_heads"] = "chunk_heads"
+    # Streaming implementation used by the FM worker. ``chunk`` returns a
+    # full action chunk; ``chunk_heads`` updates each local chunk head and
+    # returns one action. Runtime maps these to ``stream`` and ``stream-head``.
+    streaming_inference_mode: Literal["chunk", "chunk_heads"] = "chunk_heads"
 
     # Specifies how to load the policy. If not provided, the default policy for the environment will be used.
     policy: Checkpoint | Default = dataclasses.field(default_factory=Default)

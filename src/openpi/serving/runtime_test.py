@@ -132,6 +132,35 @@ def test_observation_action_runtime_queues_chunks_and_refreshes_prefix_on_refill
     assert all("session_id" not in request for request in infer_requests)
 
 
+def test_diffusion_runtime_uses_worker_actions_without_prefix_refresh():
+    class DiffusionBackend(_FakeBackend):
+        def update_prefix(self, observation, *, session_id, executed_action_id=None):
+            raise AssertionError("diffusion mode must not update a prefix")
+
+        def infer(self, request, *, session_id, cache_version):
+            self.calls.append(
+                (
+                    "infer",
+                    {
+                        "request": request,
+                        "session_id": session_id,
+                        "cache_version": cache_version,
+                    },
+                )
+            )
+            return {"actions": [[10], [11], [12]]}
+
+    backend = DiffusionBackend()
+    coordinator = runtime.RuntimeCoordinator(backend, inference_mode="diffusion")
+    outputs = [coordinator.infer_with_session({"state": [step]}, session_id="robot") for step in range(3)]
+
+    assert [int(output["actions"][0]) for output in outputs] == [10, 11, 12]
+    infer_calls = [call for call in backend.calls if call[0] == "infer"]
+    assert len(infer_calls) == 1
+    assert infer_calls[0][1]["request"]["op"] == "infer"
+    assert infer_calls[0][1]["cache_version"] is None
+
+
 def test_process_runtime_overlaps_vlm_refresh_with_current_action():
     class AsyncRefreshBackend(_FakeBackend):
         supports_async_prefix_refresh = True
