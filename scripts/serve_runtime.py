@@ -40,6 +40,61 @@ Default = _serve_policy.Default
 EnvMode = _serve_policy.EnvMode
 
 
+class _DiffusionRuntimeAdapter:
+    """Expose the legacy policy through the small Runtime client protocol.
+
+    UniVTAC's ``client_type: runtime`` sends a reset control message when a
+    websocket is opened.  A plain :class:`Policy` expects every message to be
+    an observation, so handle that lifecycle message here while keeping all
+    actual inference on the non-streaming policy path.
+    """
+
+    tactile_history_enabled = True
+    observation_action_protocol = True
+
+    def __init__(self, policy: _serve_policy._policy.Policy):
+        self._policy = policy
+
+    @property
+    def metadata(self) -> dict:
+        return self._policy.metadata
+
+    def warmup(self) -> None:
+        self._policy.warmup()
+
+    def infer_with_session(self, request: dict, *, session_id: str) -> dict:
+        op = request.get("op")
+        if op in ("reset", "reset_stream"):
+            clear_prefix_cache = request.get("clear_prefix_cache", False)
+            if not isinstance(clear_prefix_cache, bool):
+                raise ValueError("clear_prefix_cache must be a boolean")
+            self._policy.reset_tactile_history(session_id)
+            return {
+                "protocol_version": 1,
+                "session_id": session_id,
+                "status": "reset",
+                "prefix_cache_cleared": clear_prefix_cache,
+            }
+
+        if op == "infer":
+            if "observation" not in request:
+                raise ValueError("infer requires an observation")
+            request = request["observation"]
+        elif op is not None:
+            raise ValueError(f"Unsupported diffusion Runtime operation: {op}")
+
+        return self._policy.infer(request, session_id=session_id)
+
+    def infer(self, request: dict) -> dict:
+        return self.infer_with_session(request, session_id="default")
+
+    def reset_tactile_history(self, session_id: str) -> None:
+        self._policy.reset_tactile_history(session_id)
+
+    def close(self) -> None:
+        pass
+
+
 @dataclasses.dataclass
 class Args:
     """Arguments for the Runtime-managed deployment.
@@ -185,9 +240,10 @@ def _serve_diffusion(args: Args) -> None:
     policy = _serve_policy.create_policy(policy_args)
     logger.info("Warming up non-streaming diffusion policy")
     policy.warmup()
+    diffusion_policy = _DiffusionRuntimeAdapter(policy)
     metadata = {**policy.metadata, "runtime": "diffusion", "inference_mode": "diffusion"}
     server = websocket_policy_server.WebsocketPolicyServer(
-        policy=policy,
+        policy=diffusion_policy,
         host="0.0.0.0",
         port=args.port,
         metadata=metadata,
