@@ -1,4 +1,4 @@
-"""Start the managed Runtime endpoint and its private VLM/FM workers.
+"""Start a Runtime endpoint or a direct single-process diffusion endpoint.
 
 This is an additional deployment mode.  ``scripts/serve_policy.py`` remains the
 entry point for the existing single-process and client-coordinated multi-process
@@ -42,12 +42,17 @@ EnvMode = _serve_policy.EnvMode
 
 @dataclasses.dataclass
 class Args:
-    """Arguments for the Runtime-managed deployment."""
+    """Arguments for the Runtime-managed deployment.
+
+    ``process`` and ``local`` use RuntimeCoordinator's streaming protocol.
+    ``diffusion`` serves the policy directly in one process through the legacy
+    non-streaming inference path.
+    """
 
     env: EnvMode = EnvMode.ALOHA_SIM
     default_prompt: str | None = None
     port: int = 8000
-    mode: Literal["process", "local"] = "process"
+    mode: Literal["process", "local", "diffusion"] = "process"
     save_gate_logs: bool = False
     worker_start_timeout: float = 300.0
     # Runtime-owned VLM refresh schedule.  The public client only sends
@@ -161,11 +166,43 @@ def _serve_local(args: Args) -> None:
         coordinator.close()
 
 
+def _serve_diffusion(args: Args) -> None:
+    """Serve the policy directly in one process without Runtime streaming."""
+    if args.cuda_device is not None:
+        if args.cuda_device < 0:
+            raise ValueError("cuda_device must be non-negative")
+        os.environ["CUDA_VISIBLE_DEVICES"] = str(args.cuda_device)
+
+    policy_args = _serve_policy.Args(
+        env=args.env,
+        default_prompt=args.default_prompt,
+        port=args.port,
+        record=False,
+        save_gate_logs=args.save_gate_logs,
+        multi_process=False,
+        policy=args.policy,
+    )
+    policy = _serve_policy.create_policy(policy_args)
+    logger.info("Warming up non-streaming diffusion policy")
+    policy.warmup()
+    metadata = {**policy.metadata, "runtime": "diffusion", "inference_mode": "diffusion"}
+    server = websocket_policy_server.WebsocketPolicyServer(
+        policy=policy,
+        host="0.0.0.0",
+        port=args.port,
+        metadata=metadata,
+    )
+    server.serve_forever()
+
+
 def main(args: Args) -> None:
     if not 1 <= args.port <= 65535:
         raise ValueError("port must be in [1, 65535]")
     if args.mode == "local":
         _serve_local(args)
+        return
+    if args.mode == "diffusion":
+        _serve_diffusion(args)
         return
     if args.vlm_cuda_device < 0 or args.fm_cuda_device < 0:
         raise ValueError("CUDA device indices must be non-negative")
