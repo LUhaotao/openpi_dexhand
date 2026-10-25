@@ -49,9 +49,13 @@ def test_create_policy_applies_gate_log_runtime_flag(monkeypatch):
     class FakeModel:
         def __init__(self):
             self.enabled = None
+            self.manual_gate = None
 
         def set_gate_log_enabled(self, enabled):
             self.enabled = enabled
+
+        def set_manual_gate(self, gate):
+            self.manual_gate = gate
 
     class FakePolicy:
         def __init__(self):
@@ -66,11 +70,16 @@ def test_create_policy_applies_gate_log_runtime_flag(monkeypatch):
     }))
 
     result = serve_policy.create_policy(
-        serve_policy.Args(save_gate_logs=True, policy=serve_policy.Checkpoint(config="test", dir="checkpoint"))
+        serve_policy.Args(
+            save_gate_logs=True,
+            manual_gate=0.0,
+            policy=serve_policy.Checkpoint(config="test", dir="checkpoint"),
+        )
     )
 
     assert result is policy
     assert policy._model.enabled is True
+    assert policy._model.manual_gate == 0.0
 
 
 def test_create_policy_loads_complete_checkpoint_config_when_preset_is_omitted(monkeypatch, tmp_path):

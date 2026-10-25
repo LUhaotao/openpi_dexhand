@@ -183,6 +183,7 @@ class Pi0(_model.BaseModel):
         self.observation_delay_max = max(self.observation_delay_max_chunks, self.observation_delay_max_tokens)
         self._save_gate_logs = False
         self._gate_log_exp_name: str | None = None
+        self._manual_gate: float | None = None
         self.use_tactile = config.use_tactile
         self.use_torque = config.use_torque
         self.torque_dim = config.torque_dim
@@ -290,6 +291,28 @@ class Pi0(_model.BaseModel):
         """Enable or disable host-side gate logging for this serving process."""
         self._save_gate_logs = bool(enabled)
 
+    def set_manual_gate(self, gate: float | None) -> None:
+        """Override attention gates for inference; zero is represented by a finite log value."""
+        if gate is None:
+            self._manual_gate = None
+            return
+        gate = float(gate)
+        if not np.isfinite(gate) or not 0.0 <= gate <= 1.0:
+            raise ValueError("manual_gate must be a finite value in [0, 1]")
+        if self.streaming_attention_mode not in ("attention_gate", "learnable_gate"):
+            raise ValueError("manual_gate requires attention_gate or learnable_gate mode")
+        self._manual_gate = gate
+
+    def _manual_attention_log_gates(self, batch_size: int, dtype=jnp.float32):
+        if self._manual_gate is None:
+            return None
+        chunk_count = self.action_horizon // self.streaming_chunk_size
+        gate = jnp.asarray(self._manual_gate, dtype=dtype)
+        # log(0) is -inf, which can destabilize attention kernels. Keep the
+        # zero endpoint effectively closed while retaining a finite bias.
+        gate = jnp.maximum(gate, jnp.finfo(dtype).tiny)
+        return jnp.broadcast_to(jnp.log(gate), (batch_size, chunk_count))
+
     @at.typecheck
     def embed_prefix(
         self, obs: _model.Observation
@@ -353,6 +376,8 @@ class Pi0(_model.BaseModel):
     def _learnable_attention_log_gates(self, batch_size: int) -> at.Float[at.Array, "b k"] | None:
         if self.streaming_attention_mode != "learnable_gate":
             return None
+        if self._manual_gate is not None:
+            return self._manual_attention_log_gates(batch_size)
         chunk_count = self.action_horizon // self.streaming_chunk_size
         log_gate = jax.nn.log_sigmoid(self.learnable_gate_logit.value)
         return jnp.broadcast_to(log_gate, (batch_size, chunk_count))
@@ -431,6 +456,8 @@ class Pi0(_model.BaseModel):
         x = jax.nn.gelu(x + tcn_1(self._causal_conv_inputs(x, dilation=1)))
         x = jax.nn.gelu(x + tcn_2(self._causal_conv_inputs(x, dilation=2)))
         log_gates = jax.nn.log_sigmoid(gate_out(x[:, -1, :]).reshape(batch_size, chunk_count))
+        if self._manual_gate is not None:
+            log_gates = self._manual_attention_log_gates(batch_size, log_gates.dtype)
         if self._save_gate_logs and self._gate_log_exp_name is not None:
             callback = functools.partial(_append_gate_log, self._gate_log_exp_name)
             if gate_log_execution_id is None or gate_log_cache_id is None:

@@ -51,6 +51,8 @@ class Args:
     mode: Literal["process", "local"] = "process"
     inference_mode: Literal["stream", "stream-head", "diffusion"] = "stream-head"
     save_gate_logs: bool = False
+    # Inference-time override for JAX attention gates; None keeps checkpoint behavior.
+    manual_gate: float | None = None
     worker_start_timeout: float = 300.0
     # Runtime-owned VLM refresh schedule.  The public client only sends
     # observations; action-window refill and cache refresh are server policy.
@@ -108,6 +110,7 @@ def _make_worker_args(
         port=fm_port if role == "fm" else vlm_port,
         record=False,
         save_gate_logs=args.save_gate_logs,
+        manual_gate=args.manual_gate,
         multi_process=True,
         vlm_port=vlm_port,
         vlm_host="127.0.0.1",
@@ -139,6 +142,7 @@ def _serve_local(args: Args) -> None:
         port=args.port,
         record=False,
         save_gate_logs=args.save_gate_logs,
+        manual_gate=args.manual_gate,
         multi_process=False,
         policy=args.policy,
     )

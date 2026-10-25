@@ -59,6 +59,8 @@ class Args:
     record: bool = False
     # Persist conditioned gate values to a CSV while serving.
     save_gate_logs: bool = False
+    # Override the inference-time JAX attention gate with a scalar in [0, 1].
+    manual_gate: float | None = None
 
     # Start separate VLM and FM websocket servers. The default path is unchanged.
     multi_process: bool = False
@@ -135,6 +137,10 @@ def create_policy(args: Args) -> _policy.Policy:
                 train_config, checkpoint.dir, default_prompt=args.default_prompt
             )
     model = getattr(policy, "_model", None)
+    if args.manual_gate is not None:
+        if model is None or not hasattr(model, "set_manual_gate"):
+            raise ValueError("--manual-gate requires a JAX model with attention_gate or learnable_gate mode")
+        model.set_manual_gate(args.manual_gate)
     if hasattr(model, "set_gate_log_enabled"):
         model.set_gate_log_enabled(args.save_gate_logs)
     return policy
