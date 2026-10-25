@@ -13,6 +13,7 @@ import flax.nnx.bridge as nnx_bridge
 import jax
 import jax.numpy as jnp
 from typing_extensions import override
+import numpy as np
 
 from openpi.models import model as _model
 from openpi.models import pi0_config
