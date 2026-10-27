@@ -30,7 +30,19 @@ class WebsocketPolicyServer:
         self._host = host
         self._port = port
         self._metadata = metadata or {}
+        self._retain_session_on_disconnect = bool(
+            getattr(policy, "retain_session_on_disconnect", False)
+        )
+        # The Runtime deployment has one public client stream. Keep this
+        # server-owned session across WebSocket reconnects without requiring a
+        # client-persisted session token.
+        self._resumable_session_id = uuid.uuid4().hex
         logging.getLogger("websockets.server").setLevel(logging.INFO)
+
+    def _session_id_for_connection(self) -> str:
+        if self._retain_session_on_disconnect:
+            return self._resumable_session_id
+        return uuid.uuid4().hex
 
     def serve_forever(self) -> None:
         asyncio.run(self.run())
@@ -52,7 +64,7 @@ class WebsocketPolicyServer:
 
         await websocket.send(packer.pack(self._metadata))
 
-        session_id = uuid.uuid4().hex
+        session_id = self._session_id_for_connection()
         prev_total_time = None
         try:
             while True:
@@ -93,7 +105,11 @@ class WebsocketPolicyServer:
                     raise
         finally:
             reset_session = getattr(self._policy, "reset_tactile_history", None)
-            if callable(reset_session) and getattr(self._policy, "tactile_history_enabled", False):
+            if (
+                not self._retain_session_on_disconnect
+                and callable(reset_session)
+                and getattr(self._policy, "tactile_history_enabled", False)
+            ):
                 reset_session(session_id)
 
 

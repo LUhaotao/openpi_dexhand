@@ -3,10 +3,12 @@ from types import SimpleNamespace
 from typing import ClassVar
 
 import numpy as np
+import pytest
 
 from openpi.policies import multi_process_policy
 from openpi.serving import backends
 from openpi.serving import runtime
+from openpi.serving import websocket_policy_server
 from openpi.serving.runtime import CacheInfo
 
 
@@ -63,6 +65,85 @@ def test_runtime_coordinates_prefix_and_inference_through_backend():
     assert [op for op, _ in backend.calls] == ["update_prefix", "infer"]
     assert backend.calls[0][1]["session_id"] == "robot-1"
     assert backend.calls[1][1]["cache_version"] == "model:robot-1:3"
+
+
+def test_runtime_replays_unacknowledged_action_without_reinferring():
+    class CountingBackend(_FakeBackend):
+        def __init__(self):
+            super().__init__()
+            self.generated = 0
+
+        def infer(self, request, *, session_id, cache_version):
+            self.generated += 1
+            self.calls.append(("infer", {"request": request, "session_id": session_id}))
+            return {"actions": np.asarray([[self.generated]], dtype=np.float32), "cache_version": cache_version}
+
+    backend = CountingBackend()
+    coordinator = runtime.RuntimeCoordinator(backend)
+    first_request = {"state": [0], "runtime_action_id": 0}
+
+    first = coordinator.infer_with_session(first_request, session_id="runtime")
+    replay = coordinator.infer_with_session(first_request, session_id="runtime")
+    second = coordinator.infer_with_session(
+        {"state": [1], "runtime_action_id": 1, "runtime_ack_action_id": 0},
+        session_id="runtime",
+    )
+
+    assert first["action_id"] == replay["action_id"] == 0
+    np.testing.assert_array_equal(first["actions"], replay["actions"])
+    assert second["action_id"] == 1
+    assert int(second["actions"][0]) == 2
+    assert backend.generated == 2
+
+
+def test_runtime_keeps_pending_action_when_acknowledgement_mismatches():
+    backend = _FakeBackend()
+    coordinator = runtime.RuntimeCoordinator(backend)
+    request = {"state": [0], "runtime_action_id": 0}
+
+    first = coordinator.infer_with_session(request, session_id="runtime")
+    with pytest.raises(ValueError, match="Action acknowledgement mismatch"):
+        coordinator.infer_with_session(
+            {"state": [1], "runtime_action_id": 1, "runtime_ack_action_id": 99},
+            session_id="runtime",
+        )
+    with pytest.raises(ValueError, match="Action acknowledgement mismatch"):
+        coordinator.infer_with_session(
+            {"state": [0], "runtime_action_id": 0, "runtime_ack_action_id": 99},
+            session_id="runtime",
+        )
+    replay = coordinator.infer_with_session(request, session_id="runtime")
+
+    assert replay["action_id"] == 0
+    np.testing.assert_array_equal(first["actions"], replay["actions"])
+    assert len([call for call in backend.calls if call[0] == "infer"]) == 1
+
+
+def test_runtime_episode_reset_clears_pending_action_sequence():
+    backend = _FakeBackend()
+    coordinator = runtime.RuntimeCoordinator(backend)
+    coordinator.infer_with_session(
+        {"state": [0], "runtime_action_id": 0}, session_id="runtime"
+    )
+
+    coordinator.infer_with_session(
+        {"op": "reset", "clear_prefix_cache": True}, session_id="runtime"
+    )
+    result = coordinator.infer_with_session(
+        {"state": [1], "runtime_action_id": 0}, session_id="runtime"
+    )
+
+    assert result["action_id"] == 0
+
+
+def test_websocket_server_reuses_runtime_session_on_reconnect():
+    resumable = websocket_policy_server.WebsocketPolicyServer(
+        SimpleNamespace(retain_session_on_disconnect=True)
+    )
+    ordinary = websocket_policy_server.WebsocketPolicyServer(SimpleNamespace())
+
+    assert resumable._session_id_for_connection() == resumable._session_id_for_connection()  # noqa: SLF001
+    assert ordinary._session_id_for_connection() != ordinary._session_id_for_connection()  # noqa: SLF001
 
 
 def test_runtime_stream_reuses_session_prefix_when_requested():

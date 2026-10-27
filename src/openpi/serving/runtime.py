@@ -62,6 +62,12 @@ class _SessionState:
     execution_id: int = 0
     last_prefix_execution_id: int | None = None
     action_queue: deque = dataclasses.field(default_factory=deque)
+    # Public Runtime action delivery is at-least-once: keep the exact response
+    # until the client acknowledges it on the following control request.
+    next_action_id: int = 0
+    last_acked_action_id: int | None = None
+    pending_action_id: int | None = None
+    pending_action_response: dict[str, Any] | None = None
     state_history: deque = dataclasses.field(default_factory=deque)
     left_marker_history: deque = dataclasses.field(default_factory=deque)
     right_marker_history: deque = dataclasses.field(default_factory=deque)
@@ -76,6 +82,9 @@ class RuntimeCoordinator:
     # WebsocketPolicyServer uses this flag to route requests through
     # ``infer_with_session`` and to reset session state when a connection closes.
     tactile_history_enabled = True
+    # The Runtime endpoint serves one active control stream. Keep its server-owned
+    # session when the public WebSocket reconnects; episode reset remains explicit.
+    retain_session_on_disconnect = True
     # WebsocketPolicyServer uses this marker to keep timing/cache metadata out
     # of the observation/action wire protocol.
     observation_action_protocol = True
@@ -244,8 +253,15 @@ class RuntimeCoordinator:
         # never be part of the observation sent by a normal client.
         model_observation = dict(observation)
         model_observation.pop("session_id", None)
+        action_id = model_observation.pop("runtime_action_id", None)
+        ack_action_id = model_observation.pop("runtime_ack_action_id", None)
+        self._validate_action_id(action_id, "runtime_action_id", allow_none=True)
+        self._validate_action_id(ack_action_id, "runtime_ack_action_id", allow_none=True)
         session = self._session(session_id)
         with session.lock:
+            replay = self._resolve_pending_action(session, action_id, ack_action_id)
+            if replay is not None:
+                return replay
             self._collect_prefix_refresh(session)
             model_observation = self._append_observation_history(model_observation, session)
             if not session.action_queue:
@@ -268,7 +284,7 @@ class RuntimeCoordinator:
                     session.action_queue.extend(np.asarray(action) for action in actions[1:])
                     action = np.asarray(actions[0])
                     session.execution_id += 1
-                    return {"actions": action}
+                    return self._make_action_response(session, action, action_id)
 
                 needs_refresh = (
                     session.cache_version is None
@@ -326,7 +342,79 @@ class RuntimeCoordinator:
 
             self._collect_prefix_refresh(session)
             session.execution_id += 1
-            return {"actions": action}
+            return self._make_action_response(session, action, action_id)
+
+    @staticmethod
+    def _validate_action_id(value: Any, name: str, *, allow_none: bool) -> None:
+        if value is None and allow_none:
+            return
+        if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+            raise ValueError(f"{name} must be a non-negative integer")
+
+    @staticmethod
+    def _copy_action_response(response: dict[str, Any]) -> dict[str, Any]:
+        return {
+            key: value.copy() if isinstance(value, np.ndarray) else value
+            for key, value in response.items()
+        }
+
+    def _resolve_pending_action(
+        self,
+        session: _SessionState,
+        action_id: int | None,
+        ack_action_id: int | None,
+    ) -> dict[str, Any] | None:
+        """Replay an unacknowledged action or accept its client acknowledgement."""
+        if action_id is None:
+            if ack_action_id is not None:
+                raise ValueError("runtime_ack_action_id requires runtime_action_id")
+            if session.pending_action_id is not None:
+                raise ValueError("runtime_action_id is required while an action is pending")
+            return None
+
+        pending_id = session.pending_action_id
+        if pending_id is not None:
+            if action_id == pending_id:
+                if ack_action_id != session.last_acked_action_id:
+                    raise ValueError(
+                        "Action acknowledgement mismatch: "
+                        f"expected {session.last_acked_action_id}, got {ack_action_id}"
+                    )
+                if session.pending_action_response is None:
+                    raise RuntimeError("Pending Runtime action is missing its response")
+                return self._copy_action_response(session.pending_action_response)
+            if ack_action_id != pending_id:
+                raise ValueError(
+                    f"Action acknowledgement mismatch: expected {pending_id}, got {ack_action_id}"
+                )
+            if action_id != pending_id + 1:
+                raise ValueError(f"Expected runtime_action_id {pending_id + 1}, got {action_id}")
+            session.last_acked_action_id = pending_id
+            session.pending_action_id = None
+            session.pending_action_response = None
+        else:
+            if ack_action_id != session.last_acked_action_id:
+                raise ValueError(
+                    "Action acknowledgement mismatch: "
+                    f"expected {session.last_acked_action_id}, got {ack_action_id}"
+                )
+            if action_id != session.next_action_id:
+                raise ValueError(f"Expected runtime_action_id {session.next_action_id}, got {action_id}")
+        return None
+
+    def _make_action_response(
+        self,
+        session: _SessionState,
+        action: np.ndarray,
+        action_id: int | None,
+    ) -> dict[str, Any]:
+        response: dict[str, Any] = {"actions": np.array(action, copy=True)}
+        if action_id is not None:
+            response["action_id"] = action_id
+            session.pending_action_id = action_id
+            session.pending_action_response = self._copy_action_response(response)
+            session.next_action_id = action_id + 1
+        return response
 
     def _schedule_prefix_refresh(
         self,
@@ -431,6 +519,10 @@ class RuntimeCoordinator:
         session.execution_id = 0
         session.last_prefix_execution_id = None
         session.action_queue.clear()
+        session.next_action_id = 0
+        session.last_acked_action_id = None
+        session.pending_action_id = None
+        session.pending_action_response = None
         session.state_history.clear()
         session.left_marker_history.clear()
         session.right_marker_history.clear()
