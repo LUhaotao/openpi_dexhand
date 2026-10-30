@@ -300,8 +300,8 @@ class Pi0(_model.BaseModel):
         gate = float(gate)
         if not np.isfinite(gate) or not 0.0 <= gate <= 1.0:
             raise ValueError("manual_gate must be a finite value in [0, 1]")
-        if self.streaming_attention_mode not in ("attention_gate", "learnable_gate"):
-            raise ValueError("manual_gate requires attention_gate or learnable_gate mode")
+        if self.streaming_attention_mode not in ("attention_gate", "learnable_gate", "random_gate"):
+            raise ValueError("manual_gate requires attention_gate, learnable_gate, or random_gate mode")
         self._manual_gate = gate
 
     def _manual_attention_log_gates(self, batch_size: int, dtype=jnp.float32):
@@ -384,6 +384,8 @@ class Pi0(_model.BaseModel):
         return jnp.broadcast_to(log_gate, (batch_size, chunk_count))
 
     def _random_attention_log_gates(self, rng: at.KeyArrayLike, batch_size: int) -> at.Float[at.Array, "b k"]:
+        if self._manual_gate is not None:
+            return self._manual_attention_log_gates(batch_size)
         chunk_count = self.action_horizon // self.streaming_chunk_size
         gate = jax.random.uniform(
             rng,

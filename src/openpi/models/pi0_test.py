@@ -396,8 +396,26 @@ def test_manual_gate_validates_range_and_requires_gate_mode():
             model.set_manual_gate(value)
 
     ungated = _pi0_config.Pi0Config().create(jax.random.key(1))
-    with pytest.raises(ValueError, match="requires attention_gate or learnable_gate"):
+    with pytest.raises(ValueError, match="requires attention_gate, learnable_gate, or random_gate"):
         ungated.set_manual_gate(0.5)
+
+
+def test_manual_gate_overrides_random_gate():
+    config = _pi0_config.Pi0Config(
+        pi05=True,
+        streaming=True,
+        action_horizon=6,
+        streaming_chunk_size=2,
+        streaming_attention_mode="random_gate",
+        paligemma_variant="dummy",
+        action_expert_variant="dummy",
+    )
+    model = config.create(jax.random.key(0))
+    observation = config.fake_obs()
+    model.set_manual_gate(1.0)
+    log_gates = model._attention_log_gates(observation, jax.random.key(1))  # noqa: SLF001
+    assert jnp.allclose(log_gates, 0.0)
+
 
 def test_gate_log_saving_is_controlled_by_runtime_setter(monkeypatch):
     config = _pi0_config.Pi0Config(
