@@ -958,6 +958,7 @@ class Pi0(_model.BaseModel):
         observation_delay_tokens: at.Int[at.Array, "..."] | None = None,
         gate_log_execution_id: at.Int[at.Array, ""] | None = None,
         gate_log_cache_id: at.Int[at.Array, ""] | None = None,
+        rng: at.KeyArrayLike | None = None,
     ) -> _model.Actions:
         """Run the normal full-window streaming forward for one queue update.
 
@@ -989,6 +990,8 @@ class Pi0(_model.BaseModel):
                 gate_log_cache_id,
             )
         elif attention_mode in ("learnable_gate", "random_gate"):
+            if attention_mode == "random_gate":
+                rng = jax.random.key(0) if rng is None else rng
             attention_log_gates = self._attention_log_gates_from_rng(rng, state.shape[0])
         else:
             attention_log_gates = None

@@ -232,6 +232,7 @@ class MultiProcessPolicy:
                     state_history=observation.state_history,
                     observation_delay_chunks=observation.observation_delay_chunks,
                     observation_delay_tokens=observation.observation_delay_tokens,
+                    rng=jax.random.key(0),
                 )
             else:
                 action_buffer = jnp.concatenate([actions[:, :chunk_size], actions], axis=1)
@@ -949,6 +950,9 @@ class MultiProcessPolicy:
 
         action_window = stream_state.action_window
         timestep_window = stream_state.timestep_window
+        gate_rng = None
+        if getattr(self.policy._model, "streaming_attention_mode", None) == "random_gate":  # noqa: SLF001
+            self._rng, gate_rng = jax.random.split(self._rng)
         if consume:
             self._rng, noise_rng = jax.random.split(self._rng)
             fresh_noise = jax.random.normal(
@@ -961,6 +965,7 @@ class MultiProcessPolicy:
                 [timestep_window[1:], jnp.ones((1,), dtype=timestep_window.dtype)], axis=0
             )
 
+        gate_kwargs = {} if gate_rng is None else {"rng": gate_rng}
         velocity = self._advance_streaming_head_from_prefix_jit(
             model_observation.state,
             prefix_cache,
@@ -973,6 +978,7 @@ class MultiProcessPolicy:
             state_history=model_observation.state_history,
             observation_delay_chunks=observation_delay_chunks,
             observation_delay_tokens=observation_delay_tokens,
+            **gate_kwargs,
             **gate_log_context,
         )
         if getattr(self, "streaming_inference_mode", "chunk") == "chunk_heads":
