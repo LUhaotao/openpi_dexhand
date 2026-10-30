@@ -1,6 +1,8 @@
 import dataclasses
+import csv
 import functools
 import logging
+import pathlib
 import platform
 from typing import Any
 
@@ -241,6 +243,24 @@ def train_step(
         "grad_norm": optax.global_norm(grads),
         "param_norm": optax.global_norm(kernel_params),
     }
+    if config.save_gate_logs and getattr(config.model, "streaming_attention_mode", None) == "random_gate":
+        chunk_count = config.model.action_horizon // config.model.streaming_chunk_size
+        min_gate = jnp.finfo(jnp.float32).tiny
+        if accumulation_steps == 1:
+            gate_key = jax.random.split(train_rng, 6)[-1]
+            gate = jax.random.uniform(
+                gate_key, actions.shape[:-2] + (chunk_count,), minval=min_gate, maxval=1.0
+            )
+        else:
+            microbatch_rngs = jax.random.split(train_rng, accumulation_steps)
+            gate_keys = jax.vmap(lambda key: jax.random.split(key, 6)[-1])(microbatch_rngs)
+            gate = jax.vmap(
+                lambda key: jax.random.uniform(
+                    key, (actions.shape[1], chunk_count), minval=min_gate, maxval=1.0
+                )
+            )(gate_keys)
+        gate = jnp.log(gate)
+        info["gate_log_values"] = gate
     return new_state, info
 
 
@@ -318,10 +338,33 @@ def main(config: _config.TrainConfig):
     )
 
     infos = []
+    gate_log_file = None
+    if config.save_gate_logs and getattr(config.model, "streaming_attention_mode", None) == "random_gate":
+        gate_log_file = pathlib.Path(config.gate_log_path or (config.checkpoint_dir / "gate.csv"))
+        gate_log_file.parent.mkdir(parents=True, exist_ok=True)
+        if not gate_log_file.exists() or gate_log_file.stat().st_size == 0:
+            with gate_log_file.open("w", newline="") as file:
+                csv.writer(file).writerow(("step", "sample_index", "chunk_index", "log_gate", "gate"))
     for step in pbar:
         with sharding.set_mesh(mesh):
             train_state, info = ptrain_step(train_rng, train_state, batch)
         infos.append(info)
+        if gate_log_file is not None:
+            gate_values = jax.device_get(info.pop("gate_log_values"))
+            gate_values = gate_values.reshape((-1, gate_values.shape[-1]))
+            with gate_log_file.open("a", newline="") as file:
+                writer = csv.writer(file)
+                for sample_index, sample_gates in enumerate(gate_values):
+                    for chunk_index, log_gate in enumerate(sample_gates):
+                        writer.writerow(
+                            (
+                                int(train_state.step),
+                                sample_index,
+                                chunk_index,
+                                float(log_gate),
+                                float(jnp.exp(log_gate)),
+                            )
+                        )
         if step % config.log_interval == 0:
             stacked_infos = common_utils.stack_forest(infos)
             reduced_info = jax.device_get(jax.tree.map(jnp.mean, stacked_infos))

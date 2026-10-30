@@ -87,6 +87,8 @@
   "overwrite": false,
   "resume": false,
   "wandb_enabled": true,
+  "save_gate_logs": false,
+  "gate_log_path": null,
   "policy_metadata": null,
   "fsdp_devices": 1
 }

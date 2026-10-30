@@ -48,7 +48,7 @@ class Pi0Config(_model.BaseModelConfig):
     streaming: bool = False
     streaming_chunk_size: int = 5
     streaming_attention_mode: Literal[
-        "mask", "causal", "bidirectional", "attention_gate", "learnable_gate"
+        "mask", "causal", "bidirectional", "attention_gate", "learnable_gate", "random_gate"
     ] = "bidirectional"
     # Inputs to the unified conditioned attention gate.  The order is part of
     # the checkpoint interface and is always torque, tactile, state.
@@ -114,10 +114,11 @@ class Pi0Config(_model.BaseModelConfig):
             "bidirectional",
             "attention_gate",
             "learnable_gate",
+            "random_gate",
         ):
             raise ValueError(
                 "streaming_attention_mode must be one of: mask, causal, bidirectional, "
-                "attention_gate, learnable_gate"
+                "attention_gate, learnable_gate, random_gate"
             )
         if self.gate_history_length < 1:
             raise ValueError("gate_history_length must be positive")
@@ -135,7 +136,7 @@ class Pi0Config(_model.BaseModelConfig):
             raise ValueError("torque_norm_scale must be positive")
         if self.use_tactile_adarms and not self.use_tactile:
             raise ValueError("use_tactile_adarms requires use_tactile=True")
-        if self.streaming_attention_mode in ("attention_gate", "learnable_gate") and not self.streaming:
+        if self.streaming_attention_mode in ("attention_gate", "learnable_gate", "random_gate") and not self.streaming:
             raise ValueError(f"{self.streaming_attention_mode} requires streaming=True")
         if self.streaming_attention_mode == "attention_gate":
             if "torque" in self.gate_sources and not self.use_torque:

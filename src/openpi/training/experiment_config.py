@@ -261,6 +261,8 @@ def train_config_from_dict(value: Mapping[str, Any]):
             "overwrite",
             "resume",
             "wandb_enabled",
+            "save_gate_logs",
+            "gate_log_path",
             "policy_metadata",
             "fsdp_devices",
         },

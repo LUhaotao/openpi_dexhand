@@ -172,6 +172,7 @@ ckpt/
 docs/read_formsf.md
 results/
 log/
+logs/
 
 configs/experiments
 sbatch/

@@ -104,7 +104,7 @@ def make_attn_mask(input_mask, mask_ar):
 
 def _action_ar_mask(action_horizon: int, chunk_size: int, mode: str = "causal") -> list[bool]:
     """Make action-block boundaries for the selected inter-chunk attention mode."""
-    if mode in ("mask", "bidirectional", "attention_gate", "learnable_gate"):
+    if mode in ("mask", "bidirectional", "attention_gate", "learnable_gate", "random_gate"):
         return [index == 0 for index in range(action_horizon)]
     return [index % chunk_size == 0 for index in range(action_horizon)]
 
@@ -383,9 +383,30 @@ class Pi0(_model.BaseModel):
         log_gate = jax.nn.log_sigmoid(self.learnable_gate_logit.value)
         return jnp.broadcast_to(log_gate, (batch_size, chunk_count))
 
-    def _attention_log_gates(self, obs: _model.Observation) -> at.Float[at.Array, "b k"] | None:
+    def _random_attention_log_gates(self, rng: at.KeyArrayLike, batch_size: int) -> at.Float[at.Array, "b k"]:
+        chunk_count = self.action_horizon // self.streaming_chunk_size
+        gate = jax.random.uniform(
+            rng,
+            (batch_size, chunk_count),
+            minval=jnp.finfo(jnp.float32).tiny,
+            maxval=1.0,
+        )
+        return jnp.log(gate)
+
+    def _attention_log_gates_from_rng(self, rng, batch_size: int):
+        if self.streaming_attention_mode == "random_gate":
+            return self._random_attention_log_gates(rng, batch_size)
+        return self._learnable_attention_log_gates(batch_size)
+
+    def _attention_log_gates(
+        self, obs: _model.Observation, rng: at.KeyArrayLike | None = None
+    ) -> at.Float[at.Array, "b k"] | None:
         if self.streaming_attention_mode == "attention_gate":
             return self._conditioned_attention_log_gates(obs)
+        if self.streaming_attention_mode == "random_gate":
+            if rng is None:
+                raise ValueError("random_gate requires an RNG key")
+            return self._random_attention_log_gates(rng, obs.state.shape[0])
         return self._learnable_attention_log_gates(obs.state.shape[0])
 
     def _conditioned_attention_log_gates(self, obs: _model.Observation):
@@ -590,7 +611,7 @@ class Pi0(_model.BaseModel):
             regime_rng,
         ) = jax.random.split(rng, 6)
         observation = _model.preprocess_observation(preprocess_rng, observation, train=train)
-        attention_log_gates = self._attention_log_gates(observation)
+        attention_log_gates = self._attention_log_gates(observation, regime_rng)
 
         batch_shape = actions.shape[:-2]
         noise = jax.random.normal(noise_rng, actions.shape)
@@ -655,7 +676,8 @@ class Pi0(_model.BaseModel):
         )
         v_t = self.action_out_proj(suffix_out[:, -self.action_horizon :])
 
-        return jnp.mean(jnp.square(v_t - u_t), axis=-1)
+        loss = jnp.mean(jnp.square(v_t - u_t), axis=-1)
+        return loss
 
     def _mask_action_chunks(self, attn_mask, action_start: int, action_count: int | None = None):
         if self.streaming_attention_mode != "mask":
@@ -715,7 +737,7 @@ class Pi0(_model.BaseModel):
 
         # first fill KV cache with a forward pass of the prefix
         tactile_condition = self._marker_condition(observation)
-        attention_log_gates = self._attention_log_gates(observation)
+        attention_log_gates = self._attention_log_gates(observation, rng)
         prefix_tokens, prefix_mask, prefix_ar_mask = self.embed_prefix(observation)
         prefix_attn_mask = make_attn_mask(prefix_mask, prefix_ar_mask)
         positions = jnp.cumsum(prefix_mask, axis=1) - 1
@@ -816,8 +838,8 @@ class Pi0(_model.BaseModel):
                 gate_log_execution_id,
                 gate_log_cache_id,
             )
-        elif self.streaming_attention_mode == "learnable_gate":
-            attention_log_gates = self._learnable_attention_log_gates(batch_size)
+        elif self.streaming_attention_mode in ("learnable_gate", "random_gate"):
+            attention_log_gates = self._attention_log_gates_from_rng(rng, batch_size)
         else:
             attention_log_gates = None
         if noise is None:
@@ -881,8 +903,8 @@ class Pi0(_model.BaseModel):
                 gate_log_execution_id,
                 gate_log_cache_id,
             )
-        elif attention_mode == "learnable_gate":
-            attention_log_gates = self._learnable_attention_log_gates(state.shape[0])
+        elif attention_mode in ("learnable_gate", "random_gate"):
+            attention_log_gates = self._attention_log_gates_from_rng(rng, state.shape[0])
         else:
             attention_log_gates = None
 
@@ -966,8 +988,8 @@ class Pi0(_model.BaseModel):
                 gate_log_execution_id,
                 gate_log_cache_id,
             )
-        elif attention_mode == "learnable_gate":
-            attention_log_gates = self._learnable_attention_log_gates(state.shape[0])
+        elif attention_mode in ("learnable_gate", "random_gate"):
+            attention_log_gates = self._attention_log_gates_from_rng(rng, state.shape[0])
         else:
             attention_log_gates = None
 
