@@ -858,7 +858,7 @@ class TrainConfig:
 
     # If true, will enable wandb logging.
     wandb_enabled: bool = True
-    # Persist random attention-gate values from every JAX training step.
+    # Persist the actual attention-gate values used by each JAX training step.
     save_gate_logs: bool = False
     gate_log_path: str | None = None
 

@@ -602,18 +602,36 @@ class Pi0(_model.BaseModel):
 
     @override
     def compute_loss(
-        self, rng: at.KeyArrayLike, observation: _model.Observation, actions: _model.Actions, *, train: bool = False
-    ) -> at.Float[at.Array, "*b ah"]:
-        (
-            preprocess_rng,
-            noise_rng,
-            constant_time_rng,
-            chunk_time_rng,
-            token_time_rng,
-            regime_rng,
-        ) = jax.random.split(rng, 6)
+        self,
+        rng: at.KeyArrayLike,
+        observation: _model.Observation,
+        actions: _model.Actions,
+        *,
+        train: bool = False,
+        return_attention_gates: bool = False,
+    ) -> at.Float[at.Array, "*b ah"] | tuple[at.Float[at.Array, "*b ah"], at.Float[at.Array, "b k"] | None]:
+        if self.streaming_attention_mode == "random_gate":
+            (
+                preprocess_rng,
+                noise_rng,
+                constant_time_rng,
+                chunk_time_rng,
+                token_time_rng,
+                regime_rng,
+                gate_rng,
+            ) = jax.random.split(rng, 7)
+        else:
+            (
+                preprocess_rng,
+                noise_rng,
+                constant_time_rng,
+                chunk_time_rng,
+                token_time_rng,
+                regime_rng,
+            ) = jax.random.split(rng, 6)
+            gate_rng = regime_rng
         observation = _model.preprocess_observation(preprocess_rng, observation, train=train)
-        attention_log_gates = self._attention_log_gates(observation, regime_rng)
+        attention_log_gates = self._attention_log_gates(observation, gate_rng)
 
         batch_shape = actions.shape[:-2]
         noise = jax.random.normal(noise_rng, actions.shape)
@@ -679,6 +697,8 @@ class Pi0(_model.BaseModel):
         v_t = self.action_out_proj(suffix_out[:, -self.action_horizon :])
 
         loss = jnp.mean(jnp.square(v_t - u_t), axis=-1)
+        if return_attention_gates:
+            return loss, attention_log_gates
         return loss
 
     def _mask_action_chunks(self, attn_mask, action_start: int, action_count: int | None = None):

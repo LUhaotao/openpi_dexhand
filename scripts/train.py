@@ -29,6 +29,9 @@ import openpi.training.utils as training_utils
 import openpi.training.weight_loaders as _weight_loaders
 
 
+_GATE_LOG_MODES = ("attention_gate", "learnable_gate", "random_gate")
+
+
 def init_logging():
     """Custom logging format for better readability."""
     level_mapping = {"DEBUG": "D", "INFO": "I", "WARNING": "W", "ERROR": "E", "CRITICAL": "C"}
@@ -164,11 +167,25 @@ def train_step(
 ) -> tuple[training_utils.TrainState, dict[str, at.Array]]:
     model = nnx.merge(state.model_def, state.params)
     model.train()
+    save_gate_values = bool(
+        config.save_gate_logs
+        and getattr(config.model, "streaming_attention_mode", None) in _GATE_LOG_MODES
+    )
 
     @at.typecheck
     def loss_fn(
         model: _model.BaseModel, rng: at.KeyArrayLike, observation: _model.Observation, actions: _model.Actions
     ):
+        if save_gate_values:
+            result = model.compute_loss(
+                rng,
+                observation,
+                actions,
+                train=True,
+                return_attention_gates=True,
+            )
+            chunked_loss, attention_log_gates = result
+            return jnp.mean(chunked_loss), attention_log_gates
         chunked_loss = model.compute_loss(rng, observation, actions, train=True)
         return jnp.mean(chunked_loss)
 
@@ -178,10 +195,17 @@ def train_step(
     # Filter out frozen params.
     diff_state = nnx.DiffState(0, config.trainable_filter)
     params = state.params.filter(config.trainable_filter)
-    value_and_grad_fn = nnx.value_and_grad(loss_fn, argnums=diff_state)
+    value_and_grad_fn = nnx.value_and_grad(
+        loss_fn,
+        argnums=diff_state,
+        has_aux=save_gate_values,
+    )
     accumulation_steps = _gradient_accumulation_steps(config)
     if accumulation_steps == 1:
-        loss, grads = value_and_grad_fn(model, train_rng, observation, actions)
+        if save_gate_values:
+            (loss, gate_log_values), grads = value_and_grad_fn(model, train_rng, observation, actions)
+        else:
+            loss, grads = value_and_grad_fn(model, train_rng, observation, actions)
     else:
         # The leading batch dimension is the accumulation axis. Each scan iteration sees one
         # regular batch, so activations from previous microbatches can be released before the
@@ -192,24 +216,36 @@ def train_step(
         def accumulate_gradients(carry, microbatch):
             accumulated_grads, accumulated_loss = carry
             micro_observation, micro_actions, micro_rng = microbatch
-            micro_loss, micro_grads = value_and_grad_fn(
-                model,
-                micro_rng,
-                micro_observation,
-                micro_actions,
-            )
+            if save_gate_values:
+                (micro_loss, micro_gate_log_values), micro_grads = value_and_grad_fn(
+                    model,
+                    micro_rng,
+                    micro_observation,
+                    micro_actions,
+                )
+            else:
+                micro_loss, micro_grads = value_and_grad_fn(
+                    model,
+                    micro_rng,
+                    micro_observation,
+                    micro_actions,
+                )
             accumulated_grads = jax.tree.map(
                 lambda accumulated, gradient: accumulated + gradient,
                 accumulated_grads,
                 micro_grads,
             )
-            return (accumulated_grads, accumulated_loss + micro_loss), None
+            return (accumulated_grads, accumulated_loss + micro_loss), (
+                micro_gate_log_values if save_gate_values else None
+            )
 
-        (grads, loss), _ = jax.lax.scan(
+        (grads, loss), scanned_gate_log_values = jax.lax.scan(
             accumulate_gradients,
             (grad_accumulator, jnp.zeros((), dtype=jnp.float32)),
             (observation, actions, microbatch_rngs),
         )
+        if save_gate_values:
+            gate_log_values = scanned_gate_log_values
         grads = jax.tree.map(lambda gradient: gradient / accumulation_steps, grads)
         loss = loss / accumulation_steps
 
@@ -243,24 +279,8 @@ def train_step(
         "grad_norm": optax.global_norm(grads),
         "param_norm": optax.global_norm(kernel_params),
     }
-    if config.save_gate_logs and getattr(config.model, "streaming_attention_mode", None) == "random_gate":
-        chunk_count = config.model.action_horizon // config.model.streaming_chunk_size
-        min_gate = jnp.finfo(jnp.float32).tiny
-        if accumulation_steps == 1:
-            gate_key = jax.random.split(train_rng, 6)[-1]
-            gate = jax.random.uniform(
-                gate_key, actions.shape[:-2] + (chunk_count,), minval=min_gate, maxval=1.0
-            )
-        else:
-            microbatch_rngs = jax.random.split(train_rng, accumulation_steps)
-            gate_keys = jax.vmap(lambda key: jax.random.split(key, 6)[-1])(microbatch_rngs)
-            gate = jax.vmap(
-                lambda key: jax.random.uniform(
-                    key, (actions.shape[1], chunk_count), minval=min_gate, maxval=1.0
-                )
-            )(gate_keys)
-        gate = jnp.log(gate)
-        info["gate_log_values"] = gate
+    if save_gate_values:
+        info["gate_log_values"] = gate_log_values
     return new_state, info
 
 
@@ -339,7 +359,10 @@ def main(config: _config.TrainConfig):
 
     infos = []
     gate_log_file = None
-    if config.save_gate_logs and getattr(config.model, "streaming_attention_mode", None) == "random_gate":
+    if (
+        config.save_gate_logs
+        and getattr(config.model, "streaming_attention_mode", None) in _GATE_LOG_MODES
+    ):
         gate_log_file = pathlib.Path(config.gate_log_path or (config.checkpoint_dir / "gate.csv"))
         gate_log_file.parent.mkdir(parents=True, exist_ok=True)
         if not gate_log_file.exists() or gate_log_file.stat().st_size == 0:
@@ -358,7 +381,7 @@ def main(config: _config.TrainConfig):
                     for chunk_index, log_gate in enumerate(sample_gates):
                         writer.writerow(
                             (
-                                int(train_state.step),
+                                int(step),
                                 sample_index,
                                 chunk_index,
                                 float(log_gate),
